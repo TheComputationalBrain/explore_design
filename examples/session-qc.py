@@ -108,7 +108,7 @@ for quantity_name in ["motor", "surprise", "Pe", "Er", "Eu_ch"]:
                     vmin=vmin,
                     vmax=vmax,
                     bg_map=sulcal_data.data.parts[hemi],
-                    title=f"{sub} - {ses1}",
+                    title=f"{sub}-{ses1}-{hemi}-{view}",
                 )
                 plot_surf_stat_map(
                     fsaverage_meshes["inflated"],
@@ -121,7 +121,7 @@ for quantity_name in ["motor", "surprise", "Pe", "Er", "Eu_ch"]:
                     vmin=vmin,
                     vmax=vmax,
                     bg_map=sulcal_data.data.parts[hemi],
-                    title=f"{sub} - {ses2}",
+                    title=f"{sub}-{ses2}-{hemi}-{view}",
                 )
                 i += 2
 
