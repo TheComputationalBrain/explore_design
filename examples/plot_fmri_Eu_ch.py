@@ -35,7 +35,7 @@ if __name__ == "__main__":
         derivatives_folder=derivatives_folder,
         subjects=subjects,
         quantity_name="Eu_ch",
-        onset="RT",
+        onset="outcome",
         contrast_name="Eu_ch",
         dmtx_functor=make_dmtx_one_run_Eu_ch,
     )
