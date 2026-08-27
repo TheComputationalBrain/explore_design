@@ -478,3 +478,75 @@ class PredictionErrorEstimator(IdealObserverEstimator):
 
     def fit_predict(self, X: pd.DataFrame, y=None):
         return self.fit(X, y).predict(X)
+
+
+class ConfidenceEstimator(IdealObserverEstimator):
+    """
+    Extends IdealObserverEstimator to predict the confidence in the
+    prediction of the next outcome, formalized as the log precision of the
+    predictive distribution over the latent state:
+
+        confidence_t = -log( var(θ_{t+1} | y_{1:t}, υ) )
+
+    The predictive distribution p(θ_{t+1} | y_{1:t}, υ) is the posterior
+    after trial t propagated through the transition matrix
+    p(θ_{t+1} | θ_t, υ) (i.e. the predictive posterior formed *before*
+    observing trial t's outcome, index t of "predictive_posterior").
+
+    Parameters
+    ----------
+    unobserved_value : int or 'nan'
+        Value to fill for unchosen options (same convention as the other
+        estimators in this module).
+    All other parameters inherited from IdealObserverEstimator.
+    """
+
+    def __init__(
+        self,
+        latent_levels,
+        sd,
+        learning_params,
+        option_cols=("obsA", "obsB"),
+        condition_cols=None,
+        unobserved_value=0,
+    ):
+        super().__init__(
+            latent_levels=latent_levels,
+            sd=sd,
+            learning_params=learning_params,
+            option_cols=option_cols,
+            condition_cols=condition_cols,
+        )
+        self.unobserved_value = unobserved_value
+
+    def predict(self, X: pd.DataFrame):
+        """
+        Returns confidence (-log variance of the predictive distribution
+        over the latent state) per option per trial.
+        Shape: (n_trials, n_options).
+        """
+        check_is_fitted(self, "posteriors_")
+        obs, _ = self._parse_X(X)
+        n_options, n_trials = obs.shape
+
+        levels = np.asarray(self.latent_levels)
+        # predictive_posterior[:, :, 0:n_trials] aligns index t with trial t
+        # (the distribution over θ_{t+1} formed before seeing trial t's outcome)
+        pred = self.posteriors_["predictive_posterior"][:, :, :-1]
+
+        confidence = np.full((n_options, n_trials), np.nan)
+        for iopt in range(n_options):
+            for itrial in range(n_trials):
+                if ~np.isnan(obs[iopt, itrial]):
+                    p = pred[:, iopt, itrial]
+                    mean = levels @ p
+                    var = float((levels**2) @ p) - mean**2
+                    # Guard a degenerate (zero) variance, which would give -log(0) = inf
+                    var = max(var, 1e-12)
+                    confidence[iopt, itrial] = -np.log(var)
+
+        confidence = set_unobserved_value(confidence, self.unobserved_value)
+        confidence[:, get_missing(obs)] = np.nan
+
+        cols = ["Conf__" + c for c in self.option_cols_]
+        return pd.DataFrame(confidence.T, columns=cols, index=X.index)
