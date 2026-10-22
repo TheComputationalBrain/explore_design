@@ -28,7 +28,7 @@ def collapse_gifti(path):
 
 def project_volume(subject, data_dir, derivatives_dir):
     work_dir = data_dir / derivatives_dir
-    fmri_sessions = list(get_fmri_sessions(str(work_dir), subject, "ExplorePlus"))
+    fmri_sessions = list(get_fmri_sessions(str(work_dir), subject))
     os.environ["SUBJECTS_DIR"] = str(work_dir / "freesurfer")
 
     for ses in fmri_sessions:
@@ -37,7 +37,9 @@ def project_volume(subject, data_dir, derivatives_dir):
         fs_dir.mkdir(exist_ok=True)
 
         runs = sorted(
-            (subject_dir / "func").glob("sub-*_run-0[0-9]_desc-preproc_bold.nii.gz")
+            (subject_dir / "func").glob(
+                "sub-*_run-0[0-9]_desc-preproc_bold.nii.gz"
+            )
         )
 
         for img in runs:
@@ -90,8 +92,12 @@ def project_volume(subject, data_dir, derivatives_dir):
             )
 
             # fsaverage7
-            left_fsaverage7_fmri_tex = str(fs_dir / (basename + "_fsaverage7_lh.gii"))
-            right_fsaverage7_fmri_tex = str(fs_dir / (basename + "_fsaverage7_rh.gii"))
+            left_fsaverage7_fmri_tex = str(
+                fs_dir / (basename + "_fsaverage7_lh.gii")
+            )
+            right_fsaverage7_fmri_tex = str(
+                fs_dir / (basename + "_fsaverage7_rh.gii")
+            )
 
             subprocess.run(
                 [
@@ -132,8 +138,12 @@ def project_volume(subject, data_dir, derivatives_dir):
             )
 
             # fsaverage5
-            left_fsaverage5_fmri_tex = str(fs_dir / (basename + "_fsaverage5_lh.gii"))
-            right_fsaverage5_fmri_tex = str(fs_dir / (basename + "_fsaverage5_rh.gii"))
+            left_fsaverage5_fmri_tex = str(
+                fs_dir / (basename + "_fsaverage5_lh.gii")
+            )
+            right_fsaverage5_fmri_tex = str(
+                fs_dir / (basename + "_fsaverage5_rh.gii")
+            )
 
             subprocess.run(
                 [
