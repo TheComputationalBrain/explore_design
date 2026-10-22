@@ -548,5 +548,5 @@ class ConfidenceEstimator(IdealObserverEstimator):
         confidence = set_unobserved_value(confidence, self.unobserved_value)
         confidence[:, get_missing(obs)] = np.nan
 
-        cols = ["Conf__" + c for c in self.option_cols_]
+        cols = ["Confidence__" + c for c in self.option_cols_]
         return pd.DataFrame(confidence.T, columns=cols, index=X.index)
