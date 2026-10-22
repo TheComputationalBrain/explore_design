@@ -1,6 +1,4 @@
 # %%
-from __future__ import annotations
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +7,6 @@ import numpy as np
 import pandas as pd
 from nilearn.datasets import load_fsaverage
 from nilearn.glm.first_level import (
-    first_level_from_bids,
     make_first_level_design_matrix,
 )
 from nilearn.glm.first_level.first_level import _list_valid_subjects
@@ -18,7 +15,11 @@ from nilearn.surface import SurfaceImage, load_surf_data
 from tqdm import tqdm
 
 from exd.events import get_run_events
-from exd.fmri_utils import get_fmri_sessions, get_subject_session_runs_beh
+from exd.fmri_utils import (
+    first_level_from_bids,
+    get_fmri_sessions,
+    get_subject_session_runs_beh,
+)
 from exd.models.ideal_observer import (
     ConfidenceEstimator,
     IdealObserverEstimator,
@@ -28,23 +29,28 @@ from exd.models.ideal_observer import (
 )
 from exd.models.motor import MotorEstimator
 
-# --------------------------------------------------------------------------- #
-# Configuration
-# --------------------------------------------------------------------------- #
-
+# GLOBALS
 OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs")
 
 LATENT_LEVELS = [20, 40, 60, 80]
 LEARNING_PARAMS = {"vol": 0.0416}
 OPTION_COLS = ["obsA", "obsB"]
 OUTCOME_RANGE = (1, 100)
-
 MESH_NAME = "fsaverage5"
-OUTPUT_TYPES = ["effect_size", "effect_variance", "z_score"]
 
-# --------------------------------------------------------------------------- #
-# Regressor definitions
-# --------------------------------------------------------------------------- #
+# Onsets the regressors lock to; loaded once per run.
+ONSETS = ["cue", "outcome", "RT"]
+
+# Contrasts computed from every fit. Keys become output filenames.
+CONTRASTS = {
+    "Pe": "Pe",
+    "Surprise": "Surprise",
+    "Confidence": "Confidence",
+    "Er": "Er",
+    "Eu_ch": "Eu_ch",
+    "motor-LminusR": "L - R",
+}
+
 
 # Maps (estimator predictions, events) -> one modulation value per trial.
 ModulationFn = Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]
@@ -71,7 +77,8 @@ def sum_over_options(prefix: str) -> ModulationFn:
 
 
 def signed_option_difference(
-    prefix: str, choice_col: str = "arm_choice"
+    prefix: str,
+    choice_col: str = "arm_choice",
 ) -> ModulationFn:
     """Difference between options, signed so it is always (chosen - unchosen)."""
 
@@ -87,12 +94,12 @@ def signed_option_difference(
 
 
 def make_regressors(sd: float) -> list[Regressor]:
-    shared = dict(
-        latent_levels=LATENT_LEVELS,
-        sd=sd,
-        learning_params=LEARNING_PARAMS,
-        option_cols=OPTION_COLS,
-    )
+    shared = {
+        "latent_levels": LATENT_LEVELS,
+        "sd": sd,
+        "learning_params": LEARNING_PARAMS,
+        "option_cols": OPTION_COLS,
+    }
     return [
         Regressor(
             "Pe",
@@ -128,46 +135,31 @@ def make_regressors(sd: float) -> list[Regressor]:
     ]
 
 
-# Onsets the regressors above lock to; loaded once per run.
-ONSETS = ["cue", "outcome", "RT"]
-
-# Contrasts computed from every fit. Keys become output filenames.
-CONTRASTS = {
-    "Pe": "Pe",
-    "Surprise": "Surprise",
-    "Confidence": "Confidence",
-    "Er": "Er",
-    "Eu_ch": "Eu_ch",
-    "motor-LminusR": "L - R",
-}
-
-# --------------------------------------------------------------------------- #
-# Design matrix
-# --------------------------------------------------------------------------- #
-
-
 def regressor_events(
-    regressor: Regressor, events: pd.DataFrame
+    regressor: Regressor,
+    events: pd.DataFrame,
 ) -> pd.DataFrame:
     """Expand one Regressor into nilearn-style event rows."""
     base = events[["onset", "duration"]]
 
     if regressor.modulation is None:
         return base.assign(
-            trial_type=regressor.estimator.fit_predict(events), modulation=1.0
+            trial_type=regressor.estimator.fit_predict(events),
+            modulation=1.0,
         )
 
     pred = regressor.estimator.fit_predict(events)
     return pd.concat(
         [
             base.assign(
-                trial_type=f"{regressor.name}_no_modulation", modulation=1.0
+                trial_type=f"{regressor.name}_no_modulation",
+                modulation=1.0,
             ),
             base.assign(
                 trial_type=regressor.name,
                 modulation=regressor.modulation(pred, events),
             ),
-        ]
+        ],
     )
 
 
@@ -182,7 +174,11 @@ def make_full_design_matrix(
     """Build one design matrix containing every quantity for a single run."""
     events_by_onset = {
         onset: get_run_events(
-            derivatives_dir, sub=subject, ses=ses, run=run, onset=onset
+            derivatives_dir,
+            sub=subject,
+            ses=ses,
+            run=run,
+            onset=onset,
         )
         for onset in ONSETS
     }
@@ -213,37 +209,28 @@ def make_full_design_matrix(
     )
 
 
-# --------------------------------------------------------------------------- #
-# BIDS / surface helpers
-# --------------------------------------------------------------------------- #
-
-
 def parse_ses_run(path: str) -> tuple[int, int]:
     return (
-        int(path.split("ses-")[1].split("/")[0]),
-        int(path.split("run-")[1].split("_")[0]),
+        int(path.split("ses-")[1].split("/", maxsplit=1)[0]),
+        int(path.split("run-")[1].split("_", maxsplit=1)[0]),
     )
 
 
 def load_surface_run(path: str, mesh) -> SurfaceImage:
     """Load the fsaverage5 surface pair matching a volumetric preproc path."""
     surf = path.replace("/func/", "/freesurfer/").replace(
-        "_space-MNI152NLin2009cAsym", ""
+        "_space-MNI152NLin2009cAsym",
+        "",
     )
     data = {
         "left": load_surf_data(
-            surf.replace(".nii.gz", f"_{MESH_NAME}_lh.gii")
+            surf.replace(".nii.gz", f"_{MESH_NAME}_lh.gii"),
         ).T,
         "right": load_surf_data(
-            surf.replace(".nii.gz", f"_{MESH_NAME}_rh.gii")
+            surf.replace(".nii.gz", f"_{MESH_NAME}_rh.gii"),
         ).T,
     }
     return SurfaceImage(mesh=mesh, data=data)
-
-
-# --------------------------------------------------------------------------- #
-# Pipeline
-# --------------------------------------------------------------------------- #
 
 
 def first_level_analysis(
@@ -272,7 +259,10 @@ def first_level_analysis(
     mesh = load_fsaverage(MESH_NAME)["pial"]
 
     for model, run_imgs, run_confounds, subject in zip(
-        tqdm(models, desc="subject"), imgs_all, confounds_all, subjects
+        tqdm(models, desc="subject"),
+        imgs_all,
+        confounds_all,
+        subjects,
     ):
         # (ses, run) -> (image path, confounds table)
         run_map = {
@@ -280,10 +270,13 @@ def first_level_analysis(
         }
 
         for ses in sorted(
-            get_fmri_sessions(derivatives_dir, subject, task_label)
+            get_fmri_sessions(derivatives_dir, subject),
         ):
             beh_runs = get_subject_session_runs_beh(
-                derivatives_dir, subject, ses, task_label
+                derivatives_dir,
+                subject,
+                ses,
+                task_label,
             )
             # Keep only runs that have both images and behavioural data
             keys = sorted(
@@ -299,7 +292,12 @@ def first_level_analysis(
             for _, run in keys:
                 img_path, confounds = run_map[(ses, run)]
                 dmtx = make_full_design_matrix(
-                    model, confounds, derivatives_dir, subject, ses, run
+                    model,
+                    confounds,
+                    derivatives_dir,
+                    subject,
+                    ses,
+                    run,
                 )
 
                 output_run = output_ses / f"run-{run}"
@@ -318,18 +316,23 @@ def first_level_analysis(
 
             # Save statistical maps
             for name, expression in contrasts.items():
-                for output_type in OUTPUT_TYPES:
+                for output_type in [
+                    "effect_size",
+                    "effect_variance",
+                    "z_score",
+                ]:
                     stat_map = model.compute_contrast(
-                        expression, output_type=output_type
+                        expression,
+                        output_type=output_type,
                     )
                     stat_map.data.to_filename(
-                        output_ses / f"quantity-{name}_stat-{output_type}.gii"
+                        output_ses / f"quantity-{name}_stat-{output_type}.gii",
                     )
 
 
 if __name__ == "__main__":
     data_dir = Path(
-        "/home/plbarbarant/nasShare/projects/protocols/ExplorePlus_MeynielPaunovRaglio_2024"
+        "/home/plbarbarant/nasShare/projects/protocols/ExplorePlus_MeynielPaunovRaglio_2024",
     )
     derivatives_folder = "derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0"
     subjects = _list_valid_subjects(str(data_dir / derivatives_folder), None)
