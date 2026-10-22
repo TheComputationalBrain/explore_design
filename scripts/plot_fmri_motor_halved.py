@@ -24,14 +24,14 @@ def make_dmtx_one_run_motor(model, events, confounds, estimator) -> pd.DataFrame
     end_time = (n_scans - 1 + model.slice_time_ref) * model.t_r
     frame_times = np.linspace(start_time, end_time, n_scans)
     dmtx = make_first_level_design_matrix(
-        frame_times=frame_times,
+        frame_times=frame_times[n_scans // 2 :],
         events=events,
         hrf_model=model.hrf_model,
         drift_model=model.drift_model,
         high_pass=model.high_pass,
         drift_order=model.drift_order,
         fir_delays=model.fir_delays,
-        add_regs=regs,
+        add_regs=regs[n_scans // 2 :],
         add_reg_names=confounds.columns.tolist(),
         min_onset=model.min_onset,
     )
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         task_label=task_label,
         derivatives_folder=derivatives_folder,
         subjects=subjects,
-        quantity_name="motor",
+        quantity_name="motor_second_half",
         onset="RT",
         contrast_name="R - L",
         dmtx_functor=partial(make_dmtx_one_run_motor, estimator=estimator),

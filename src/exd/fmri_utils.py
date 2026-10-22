@@ -8,9 +8,7 @@ from nilearn.glm.first_level import (
     first_level_from_bids,
     make_first_level_design_matrix,
 )
-from nilearn.plotting import (
-    plot_design_matrix,
-)
+from nilearn.plotting import plot_design_matrix
 from nilearn.surface import SurfaceImage, load_surf_data
 from tqdm import tqdm
 
@@ -72,7 +70,9 @@ def first_level_analysis(
                 derivatives_dir, subject, ses, task_label
             )
             # Keep only ses, runs with behavioral data attached
-            keys = sorted(k for k in run_map if k[0] == ses and k[1] in beh_runs)
+            keys = sorted(
+                k for k in run_map if k[0] == ses and k[1] in beh_runs
+            )
 
             selected_imgs = [run_map[k][0] for k in keys]
             selected_confounds = [run_map[k][1] for k in keys]
@@ -81,16 +81,23 @@ def first_level_analysis(
             design_matrices = []
             for run_id, confounds in zip(selected_run_ids, selected_confounds):
                 output_path_run = (
-                    output_path_ses / f"res_quantity-{quantity_name}_run-{run_id}"
+                    output_path_ses
+                    / f"res_quantity-{quantity_name}_run-{run_id}"
                 )
                 output_path_run.mkdir(exist_ok=True, parents=True)
                 run_events = get_run_events(
-                    derivatives_dir, sub=subject, ses=ses, run=run_id, onset=onset
+                    derivatives_dir,
+                    sub=subject,
+                    ses=ses,
+                    run=run_id,
+                    onset=onset,
                 )
                 dmtx = dmtx_functor(model, run_events, confounds)
                 design_matrices.append(dmtx)
                 plot_design_matrix(
-                    dmtx, rescale=True, output_file=str(output_path_run / "dmtx.png")
+                    dmtx,
+                    rescale=True,
+                    output_file=str(output_path_run / "dmtx.png"),
                 )
 
             # Load surface images
@@ -102,10 +109,9 @@ def first_level_analysis(
                 )
                 path_lh = path_surf.replace(".nii.gz", "_fsaverage5_lh.gii")
                 path_rh = path_surf.replace(".nii.gz", "_fsaverage5_rh.gii")
-                data = {
-                    "left": load_surf_data(path_lh).T,
-                    "right": load_surf_data(path_rh).T,
-                }
+                left_data = load_surf_data(path_lh).T
+                right_data = load_surf_data(path_rh).T
+                data = {"left": left_data, "right": right_data}
                 surf_imgs.append(SurfaceImage(mesh=mesh, data=data))
 
             model.fit(run_imgs=surf_imgs, design_matrices=design_matrices)

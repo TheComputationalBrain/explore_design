@@ -4,8 +4,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from nilearn.datasets import load_fsaverage, load_fsaverage_data
 from nilearn.glm import threshold_stats_img
-from nilearn.glm.first_level.first_level import _list_valid_subjects
-from nilearn.plotting import show, plot_surf_stat_map
+from nilearn.plotting import plot_surf_stat_map, show
 from nilearn.surface import SurfaceImage
 
 data_dir = Path(
@@ -14,9 +13,7 @@ data_dir = Path(
 task_label = "ExplorePlus"
 space_label = "MNI152NLin2009cAsym"
 derivatives_folder = "derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0/"
-subjects_label = _list_valid_subjects(str(data_dir / derivatives_folder), None)
-quantity_name = "motor"
-for quantity_name in ["motor", "surprise", "Pe", "Er", "Eu_ch"]:
+for quantity_name in ["motor_first_half", "motor_second_half"]:
     imgs_L = sorted(
         list(
             Path("/home/plbarbarant/repos/explore_design/outputs/").rglob(
@@ -44,14 +41,12 @@ for quantity_name in ["motor", "surprise", "Pe", "Er", "Eu_ch"]:
         sessions.append(str(img_L)[54:59])
         imgs.append(SurfaceImage(mesh=fsaverage_meshes["pial"], data=data))
 
-
     def threshold_stat_map(stat_map_img, alpha=0.05, height_control="fdr"):
         """Threshold a stat map using FDR correction."""
         thresholded_map, threshold = threshold_stats_img(
             stat_map_img, alpha=alpha, height_control=height_control
         )
         return thresholded_map, threshold
-
 
     # Group images by subject: {subject_label: [img_ses1, img_ses2]}
     subject_to_imgs = {}
@@ -91,7 +86,7 @@ for quantity_name in ["motor", "surprise", "Pe", "Er", "Eu_ch"]:
         thresholded_ses1, threshold1 = threshold_stat_map(img_ses1, alpha=alpha)
         thresholded_ses2, threshold2 = threshold_stat_map(img_ses2, alpha=alpha)
 
-        vmax = 10
+        vmax = 5
         vmin = -vmax
 
         i = 0
@@ -107,6 +102,7 @@ for quantity_name in ["motor", "surprise", "Pe", "Er", "Eu_ch"]:
                     threshold=threshold1,
                     vmin=vmin,
                     vmax=vmax,
+                    cmap="cold_hot",
                     bg_map=sulcal_data.data.parts[hemi],
                     title=f"{sub}-{ses1}-{hemi}-{view}",
                 )
@@ -120,6 +116,7 @@ for quantity_name in ["motor", "surprise", "Pe", "Er", "Eu_ch"]:
                     threshold=threshold2,
                     vmin=vmin,
                     vmax=vmax,
+                    cmap="cold_hot",
                     bg_map=sulcal_data.data.parts[hemi],
                     title=f"{sub}-{ses2}-{hemi}-{view}",
                 )

@@ -6,7 +6,7 @@ import pandas as pd
 
 def make_events(
     features: pd.DataFrame,
-    onset,
+    onset: str,
 ):
     if onset == "RT":
         onset = (features.trial_start + features.RT) / 1000
