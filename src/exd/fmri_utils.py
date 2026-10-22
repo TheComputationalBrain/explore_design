@@ -1,194 +1,308 @@
 from pathlib import Path
+from warnings import warn
 
-import numpy as np
-import pandas as pd
-from nilearn.datasets import load_fsaverage
-from nilearn.glm.first_level import (
-    compute_regressor,
-    first_level_from_bids,
-    make_first_level_design_matrix,
+from joblib import Memory
+from nilearn._utils.logger import find_stack_level
+from nilearn._utils.param_validation import (
+    check_params,
 )
-from nilearn.plotting import plot_design_matrix
-from nilearn.surface import SurfaceImage, load_surf_data
-from tqdm import tqdm
+from nilearn.glm.first_level.first_level import (
+    FirstLevelModel,
+    _check_args_first_level_from_bids,
+    _check_kwargs_load_confounds,
+    _check_repetition_time,
+    _check_slice_time_ref,
+    _get_confounds,
+    _get_masks_files,
+    _get_processed_imgs,
+    _list_valid_subjects,
+    _make_bids_files_filter,
+)
+from nilearn.interfaces.bids.query import (
+    infer_repetition_time_from_dataset,
+    infer_slice_timing_start_time_from_dataset,
+)
+from nilearn.interfaces.bids.utils import bids_entities
+from nilearn.masking import intersect_masks
 
-from exd.events import get_run_events
 
-
-def first_level_analysis(
-    data_dir,
-    derivatives_folder,
+def first_level_from_bids(
+    dataset_path,
     task_label,
-    subjects,
-    quantity_name,
-    onset,
-    contrast_name,
-    dmtx_functor,
+    space_label=None,
+    sub_labels=None,
+    exclude_subjects=None,
+    img_filters=None,
+    t_r=None,
+    slice_time_ref=None,
+    hrf_model="glover",
+    drift_model="cosine",
+    high_pass=0.01,
+    drift_order=1,
+    fir_delays=None,
+    min_onset=-24,
+    mask_img=None,
+    target_affine=None,
+    target_shape=None,
+    smoothing_fwhm=None,
+    memory=None,
+    memory_level=1,
+    standardize=False,
+    signal_scaling=0,
+    noise_model="ar1",
+    verbose=0,
+    n_jobs=1,
+    minimize_memory=True,
+    derivatives_folder="derivatives",
+    **kwargs,
 ):
-    derivatives_dir = str(Path(data_dir) / derivatives_folder)
-    (
-        models_all_subjects,
-        run_imgs_all_subjects,
-        _,
-        confounds_all_subjects,
-    ) = first_level_from_bids(
-        data_dir,
-        task_label,
-        space_label=None,
-        sub_labels=subjects,
-        smoothing_fwhm=3.0,
-        high_pass=1 / 128,
-        t_r=1.71,
-        hrf_model="spm + derivative",
+    """Adapted version of nilearn.glm.first_level.first_level_from_bids\
+    without event loading."""
+    check_params(locals())
+    if memory is None:
+        memory = Memory(None)
+    if space_label is None:
+        space_label = "MNI152NLin2009cAsym"
+
+    sub_labels = sub_labels or []
+    img_filters = img_filters or []
+    exclude_subjects = exclude_subjects or []
+
+    _check_args_first_level_from_bids(
+        dataset_path=dataset_path,
+        task_label=task_label,
+        space_label=space_label,
+        sub_labels=sub_labels,
+        exclude_subjects=exclude_subjects,
+        img_filters=img_filters,
         derivatives_folder=derivatives_folder,
-        confounds_strategy=["motion", "global_signal"],
-        n_jobs=10,
-        verbose=10,
     )
-    for i, subject in tqdm(enumerate(subjects), desc="Processing subject: "):
-        model = models_all_subjects[i]
-        run_imgs = run_imgs_all_subjects[i]
-        confounds = confounds_all_subjects[i]
 
-        fmri_sessions = get_fmri_sessions(derivatives_dir, subject, task_label)
-        run_map = {
-            (
-                int(p.split("ses-")[1].split("/")[0]),
-                int(p.split("run-")[1].split("_")[0]),
-            ): (p, c)
-            for p, c in zip(run_imgs, confounds)
-        }
+    dataset_path = Path(dataset_path).absolute()
 
-        for ses in fmri_sessions:
-            output_path_ses = (
-                Path("/home/plbarbarant/repos/explore_design/outputs/")
-                / f"sub-{subject}"
-                / f"ses-{ses}"
+    kwargs_load_confounds, remaining_kwargs = _check_kwargs_load_confounds(
+        **kwargs
+    )
+
+    if len(remaining_kwargs) > 0:
+        raise RuntimeError(
+            "Unknown keyword arguments. Keyword arguments should start with "
+            f"`confounds_` prefix: {remaining_kwargs}"
+        )
+
+    if (
+        drift_model is not None
+        and kwargs_load_confounds is not None
+        and "high_pass" in kwargs_load_confounds.get("strategy", [])
+    ):
+        if drift_model == "cosine":
+            verb = "duplicate"
+        if drift_model == "polynomial":
+            verb = "conflict with"
+
+        warn(
+            f"""Confounds will contain a high pass filter,
+ that may {verb} the {drift_model} one used in the model.
+ Remember to visualize your design matrix before fitting your model
+ to check that your model is not overspecified.""",
+            UserWarning,
+            stacklevel=find_stack_level(),
+        )
+
+    derivatives_path = Path(dataset_path) / derivatives_folder
+    derivatives_path = derivatives_path.absolute()
+
+    # Get metadata for models.
+    #
+    # We do it once and assume all subjects and runs
+    # have the same value.
+
+    # Repetition time
+    #
+    # Try to find a t_r value in the bids datasets
+    # If the parameter information is not found in the derivatives folder,
+    # a search is done in the raw data folder.
+    filters = _make_bids_files_filter(
+        task_label=task_label,
+        space_label=space_label,
+        supported_filters=[
+            *bids_entities()["raw"],
+            *bids_entities()["derivatives"],
+        ],
+        extra_filter=img_filters,
+        verbose=verbose,
+    )
+    inferred_t_r = infer_repetition_time_from_dataset(
+        bids_path=derivatives_path, filters=filters, verbose=verbose
+    )
+    if inferred_t_r is None:
+        filters = _make_bids_files_filter(
+            task_label=task_label,
+            supported_filters=[*bids_entities()["raw"]],
+            extra_filter=[x for x in img_filters if x[0] != "desc"],
+            verbose=verbose,
+        )
+        inferred_t_r = infer_repetition_time_from_dataset(
+            bids_path=dataset_path, filters=filters, verbose=verbose
+        )
+
+    if t_r is None and inferred_t_r is not None:
+        t_r = inferred_t_r
+    if t_r is not None and t_r != inferred_t_r:
+        warn(
+            f"\n't_r' provided ({t_r}) is different "
+            f"from the value found in the BIDS dataset ({inferred_t_r}).\n"
+            "Note this may lead to the wrong model specification.",
+            stacklevel=find_stack_level(),
+            category=RuntimeWarning,
+        )
+    if t_r is not None:
+        _check_repetition_time(t_r)
+    else:
+        warn(
+            "\n't_r' not provided and cannot be inferred from BIDS metadata.\n"
+            "It will need to be set manually in the list of models, "
+            "otherwise their fit will throw an exception.",
+            stacklevel=find_stack_level(),
+            category=RuntimeWarning,
+        )
+
+    # Slice time correction reference time
+    #
+    # Try to infer a slice_time_ref value in the bids derivatives dataset.
+    #
+    # If no value can be inferred, the default value of 0.0 is used.
+    filters = _make_bids_files_filter(
+        task_label=task_label,
+        space_label=space_label,
+        supported_filters=[
+            *bids_entities()["raw"],
+            *bids_entities()["derivatives"],
+        ],
+        extra_filter=img_filters,
+        verbose=verbose,
+    )
+    StartTime = infer_slice_timing_start_time_from_dataset(
+        bids_path=derivatives_path, filters=filters, verbose=verbose
+    )
+    if StartTime is not None and t_r is not None:
+        assert StartTime < t_r
+        inferred_slice_time_ref = StartTime / t_r
+    else:
+        if slice_time_ref is None:
+            warn(
+                "'slice_time_ref' not provided "
+                "and cannot be inferred from metadata.\n"
+                "It will be assumed that the slice timing reference "
+                "is 0.0 percent of the repetition time.\n"
+                "If it is not the case it will need to "
+                "be set manually in the generated list of models.",
+                stacklevel=find_stack_level(),
             )
-            output_path_ses.mkdir(exist_ok=True, parents=True)
-            beh_runs = get_subject_session_runs_beh(
-                derivatives_dir, subject, ses, task_label
+        inferred_slice_time_ref = 0.0
+
+    if slice_time_ref is None and inferred_slice_time_ref is not None:
+        slice_time_ref = inferred_slice_time_ref
+    if slice_time_ref is not None and slice_time_ref != inferred_slice_time_ref:
+        warn(
+            f"'slice_time_ref' provided ({slice_time_ref}) is different "
+            f"from the value found in the BIDS dataset "
+            f"({inferred_slice_time_ref}).\n"
+            "Note this may lead to the wrong model specification.",
+            stacklevel=find_stack_level(),
+        )
+    if slice_time_ref is not None:
+        _check_slice_time_ref(slice_time_ref)
+
+    # Build fit_kwargs dictionaries to pass to their respective models fit
+    # Events and confounds files must match number of imgs (runs)
+    models = []
+    models_run_imgs = []
+    models_events = []
+    models_confounds = []
+
+    sub_labels = _list_valid_subjects(derivatives_path, sub_labels)
+    if len(sub_labels) == 0:
+        raise RuntimeError(f"\nNo subject found in:\n {derivatives_path}")
+
+    sub_labels = sorted(set(sub_labels) - set(exclude_subjects))
+
+    for sub_label_ in sub_labels:
+        # Create model
+        model = FirstLevelModel(
+            t_r=t_r,
+            slice_time_ref=slice_time_ref,
+            hrf_model=hrf_model,
+            drift_model=drift_model,
+            high_pass=high_pass,
+            drift_order=drift_order,
+            fir_delays=fir_delays,
+            min_onset=min_onset,
+            mask_img=None if mask_img == "derivatives" else mask_img,
+            target_affine=target_affine,
+            target_shape=target_shape,
+            smoothing_fwhm=smoothing_fwhm,
+            memory=memory,
+            memory_level=memory_level,
+            standardize=standardize,
+            signal_scaling=signal_scaling,
+            noise_model=noise_model,
+            verbose=verbose,
+            n_jobs=n_jobs,
+            minimize_memory=minimize_memory,
+            subject_label=sub_label_,
+        )
+        models.append(model)
+
+        imgs, files_to_check = _get_processed_imgs(
+            derivatives_path=derivatives_path,
+            sub_label=sub_label_,
+            task_label=task_label,
+            space_label=space_label,
+            img_filters=img_filters,
+            verbose=verbose,
+        )
+        models_run_imgs.append(imgs)
+
+        confounds = _get_confounds(
+            derivatives_path=derivatives_path,
+            sub_label=sub_label_,
+            task_label=task_label,
+            img_filters=img_filters,
+            imgs=files_to_check,
+            verbose=verbose,
+            kwargs_load_confounds=kwargs_load_confounds,
+        )
+        models_confounds.append(confounds)
+
+        if mask_img == "derivatives":
+            masks = _get_masks_files(
+                derivatives_path=derivatives_path,
+                sub_label=sub_label_,
+                task_label=task_label,
+                space_label=space_label,
+                img_filters=img_filters,
+                imgs=files_to_check,
+                verbose=verbose,
             )
-            # Keep only ses, runs with behavioral data attached
-            keys = sorted(
-                k for k in run_map if k[0] == ses and k[1] in beh_runs
-            )
+            if masks:
+                mask_img = intersect_masks(
+                    masks, threshold=0.5, connected=False
+                )
+                model.mask_img = mask_img
 
-            selected_imgs = [run_map[k][0] for k in keys]
-            selected_confounds = [run_map[k][1] for k in keys]
-            selected_run_ids = [k[1] for k in keys]
-
-            design_matrices = []
-            for run_id, confounds in zip(selected_run_ids, selected_confounds):
-                output_path_run = (
-                    output_path_ses
-                    / f"res_quantity-{quantity_name}_run-{run_id}"
-                )
-                output_path_run.mkdir(exist_ok=True, parents=True)
-                run_events = get_run_events(
-                    derivatives_dir,
-                    sub=subject,
-                    ses=ses,
-                    run=run_id,
-                    onset=onset,
-                )
-                dmtx = dmtx_functor(model, run_events, confounds)
-                design_matrices.append(dmtx)
-                plot_design_matrix(
-                    dmtx,
-                    rescale=True,
-                    output_file=str(output_path_run / "dmtx.png"),
-                )
-
-            # Load surface images
-            surf_imgs = []
-            mesh = load_fsaverage("fsaverage5")["pial"]
-            for path in selected_imgs:
-                path_surf = path.replace("/func/", "/freesurfer/").replace(
-                    "_space-MNI152NLin2009cAsym", ""
-                )
-                path_lh = path_surf.replace(".nii.gz", "_fsaverage5_lh.gii")
-                path_rh = path_surf.replace(".nii.gz", "_fsaverage5_rh.gii")
-                left_data = load_surf_data(path_lh).T
-                right_data = load_surf_data(path_rh).T
-                data = {"left": left_data, "right": right_data}
-                surf_imgs.append(SurfaceImage(mesh=mesh, data=data))
-
-            model.fit(run_imgs=surf_imgs, design_matrices=design_matrices)
-            for output_type in ["effect_size", "effect_variance", "z_score"]:
-                stat_map = model.compute_contrast(
-                    contrast_name, output_type=output_type
-                )
-                stat_map.data.to_filename(
-                    output_path_ses
-                    / f"quantity_{quantity_name}_stat-{output_type}.gii",
-                )
+    return models, models_run_imgs, models_events, models_confounds
 
 
 def get_subject_session_runs_beh(data_dir, subject, ses, task_label) -> set:
     """Glob BIDS files to find available run indices for a subject/session."""
     pattern = f"sub-{subject}/ses-{ses}/beh/*task-{task_label}*_run-*_beh.tsv"
     run_files = sorted(Path(data_dir).glob(pattern))
-    return set([int(f.stem.split("run-")[1].split("_")[0]) for f in run_files])
+    return {int(f.stem.split("run-")[1].split("_")[0]) for f in run_files}
 
 
-def get_fmri_sessions(derivatives_dir, subject, task_label) -> set:
+def get_fmri_sessions(derivatives_dir, subject) -> set:
     """Get available fMRI sessions for a subject."""
     pattern = f"sub-{subject}/ses-*/func"
     func_dirs = sorted(Path(derivatives_dir).glob(pattern))
-    return set([int(f.parent.name.split("-")[1]) for f in func_dirs])
-
-
-def make_modulated_dtmx(model, events, confounds, quantity_name):
-    # Frame times
-    n_scans = len(confounds)
-    start_time = model.slice_time_ref * model.t_r
-    end_time = (n_scans - 1 + model.slice_time_ref) * model.t_r
-    frame_times = np.linspace(start_time, end_time, n_scans)
-
-    # Events without modulation
-    condition = np.array(
-        [
-            events["onset"].values,
-            events["duration"].values,
-            np.ones(len(events)),
-        ]
-    )
-    quantity_no_mod, _ = compute_regressor(
-        exp_condition=condition,
-        hrf_model=model.hrf_model,
-        frame_times=frame_times,
-        min_onset=model.min_onset,
-    )
-    confounds = confounds.copy()
-    confounds.insert(0, f"{quantity_name}_no_modulation", quantity_no_mod[:, 0])
-
-    # Modulation of events by the quantity of interest
-    modulated_events = pd.DataFrame(
-        {
-            "onset": events["onset"].values,
-            "duration": events["duration"].values,
-            "trial_type": f"{quantity_name}",
-            "modulation": events[f"{quantity_name}"].values,
-        }
-    )
-
-    # Replace missing values in confounds
-    regs = confounds.fillna(0).to_numpy()
-
-    dmtx = make_first_level_design_matrix(
-        frame_times=frame_times,
-        events=modulated_events,
-        hrf_model=model.hrf_model,
-        drift_model=model.drift_model,
-        high_pass=model.high_pass,
-        drift_order=model.drift_order,
-        fir_delays=model.fir_delays,
-        add_regs=regs,
-        add_reg_names=confounds.columns.tolist(),
-        min_onset=model.min_onset,
-    )
-
-    # Remove dummy columns
-    dmtx = dmtx.loc[:, ~dmtx.columns.str.startswith("dummy")]
-    return dmtx
+    return {int(f.parent.name.split("-")[1]) for f in func_dirs}
