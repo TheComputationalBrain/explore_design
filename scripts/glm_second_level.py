@@ -2,8 +2,8 @@
 """Compare functional alignment methods at the group level.
 
 For each method (and smoothing level), subject maps are the effect sizes
-averaged over the aligned sessions, tested against 0 with a sign-flipping
-permutation test (FWE-corrected, max-statistic procedure).
+averaged over the aligned sessions, tested against 0 with a one-sample
+second-level GLM; z-maps are thresholded with a false discovery rate.
 """
 
 from pathlib import Path
@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from nilearn.datasets import load_fsaverage, load_fsaverage_data
-from nilearn.glm.second_level import SecondLevelModel, non_parametric_inference
+from nilearn.glm import threshold_stats_img
+from nilearn.glm.second_level import SecondLevelModel
 from nilearn.plotting import plot_surf_stat_map, show
 from nilearn.surface import SurfaceImage, load_surf_data
 
@@ -27,8 +28,7 @@ CONDITIONS = [
 ]
 MESH_NAME = "fsaverage5"  # mesh of the first-level maps
 ALPHA = 0.05
-N_PERM = 10000
-N_JOBS = 10
+HEIGHT_CONTROL = "fpr"
 # Display
 HEMI = "right"
 VIEW = "lateral"
@@ -59,27 +59,17 @@ def load_subject_maps(method, quantity, mesh) -> list[SurfaceImage]:
     return imgs
 
 
-def signed_neg_log_pvals(imgs, smoothing_fwhm) -> SurfaceImage:
-    """FWE-corrected -log10 p-values, signed by the effect direction."""
+def thresholded_z_map(imgs, smoothing_fwhm):
+    """One-sample z-map, thresholded with HEIGHT_CONTROL at ALPHA."""
     design_matrix = pd.DataFrame({"intercept": np.ones(len(imgs))})
-    neg_log_pvals = non_parametric_inference(
-        imgs,
-        design_matrix=design_matrix,
-        smoothing_fwhm=smoothing_fwhm,
-        n_perm=N_PERM,
-        two_sided_test=True,
-        n_jobs=N_JOBS,
-    )
     z_map = (
         SecondLevelModel(smoothing_fwhm=smoothing_fwhm)
         .fit(imgs, design_matrix=design_matrix)
         .compute_contrast("intercept", output_type="z_score")
     )
-    data = {
-        hemi: np.sign(z_map.data.parts[hemi]) * neg_log_pvals.data.parts[hemi]
-        for hemi in HEMIS.values()
-    }
-    return SurfaceImage(mesh=z_map.mesh, data=data)
+    return threshold_stats_img(
+        z_map, alpha=ALPHA, height_control=HEIGHT_CONTROL, two_sided=True
+    )
 
 
 # %%
@@ -99,7 +89,7 @@ for method, fwhm in CONDITIONS:
     for quantity in quantities:
         print(f"Computing {method} {fwhm}mm, quantity {quantity}")
         imgs = load_subject_maps(method, quantity, fsaverage["pial"])
-        results[method, fwhm, quantity] = signed_neg_log_pvals(imgs, fwhm)
+        results[method, fwhm, quantity] = thresholded_z_map(imgs, fwhm)
 
 # %%
 fig, axes = plt.subplots(
@@ -111,19 +101,20 @@ fig, axes = plt.subplots(
 for col, (method, fwhm) in enumerate(CONDITIONS):
     label = method if fwhm is None else f"{method} {fwhm:g}mm"
     for row, quantity in enumerate(quantities):
+        z_map, threshold = results[method, fwhm, quantity]
         plot_surf_stat_map(
             fsaverage["inflated"],
-            stat_map=results[method, fwhm, quantity],
+            stat_map=z_map,
             hemi=HEMI,
             view=VIEW,
             bg_map=sulcal,
             bg_on_data=True,
-            threshold=-np.log10(ALPHA),
+            threshold=threshold,
             cmap="cold_hot",
             colorbar=False,
-            title=f"{quantity} - {label}",
+            title=f"{quantity} - {label} (z > {threshold:.2f})",
             axes=axes[row, col],
             figure=fig,
         )
-fig.suptitle(f"Signed -log10 p (FWE, {N_PERM} perm.), threshold p < {ALPHA}")
+fig.suptitle(f"Second-level z-maps, {HEIGHT_CONTROL} < {ALPHA}")
 show()
