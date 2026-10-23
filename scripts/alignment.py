@@ -23,7 +23,7 @@ MESH_NAME = "fsaverage5"  # mesh of the first-level maps
 N_JOBS = 10
 
 # SpectralOT (whole hemisphere); the other methods are piecewise on Destrieux
-SPECTRAL_REG = 1e-3
+SPECTRAL_REG = 1e-4
 SPECTRAL_ALPHA = 0.5
 N_EIGENMODES = 3
 SPECTRAL_DEVICE = "cuda:0"
