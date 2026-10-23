@@ -294,5 +294,5 @@ def first_level_analysis(
 
 if __name__ == "__main__":
     derivatives_dir = str(DATA_DIR / DERIVATIVES_FOLDER)
-    subjects = _list_valid_subjects(derivatives_dir, None)[:1]
+    subjects = _list_valid_subjects(derivatives_dir, None)
     first_level_analysis(subjects)
