@@ -1,11 +1,14 @@
 from pathlib import Path
 from warnings import warn
 
+import numpy as np
+import pandas as pd
 from joblib import Memory
 from nilearn._utils.logger import find_stack_level
 from nilearn._utils.param_validation import (
     check_params,
 )
+from nilearn.glm.first_level import make_first_level_design_matrix
 from nilearn.glm.first_level.first_level import (
     FirstLevelModel,
     _check_args_first_level_from_bids,
@@ -18,12 +21,15 @@ from nilearn.glm.first_level.first_level import (
     _list_valid_subjects,
     _make_bids_files_filter,
 )
+from nilearn.interfaces.bids import parse_bids_filename
 from nilearn.interfaces.bids.query import (
     infer_repetition_time_from_dataset,
     infer_slice_timing_start_time_from_dataset,
 )
 from nilearn.interfaces.bids.utils import bids_entities
 from nilearn.masking import intersect_masks
+from nilearn.plotting import plot_design_matrix
+from nilearn.surface import SurfaceImage, load_surf_data
 
 
 def first_level_from_bids(
@@ -306,3 +312,130 @@ def get_fmri_sessions(derivatives_dir, subject) -> set:
     pattern = f"sub-{subject}/ses-*/func"
     func_dirs = sorted(Path(derivatives_dir).glob(pattern))
     return {int(f.parent.name.split("-")[1]) for f in func_dirs}
+
+
+def get_session_runs(imgs, confounds, derivatives_dir, subject, task_label):
+    """Group runs by session, keeping those with both images and behaviour.
+
+    Parameters
+    ----------
+    imgs : list of str
+        Preprocessed BOLD paths of the subject.
+    confounds : list of pd.DataFrame
+        Confounds of each image, in the same order.
+    derivatives_dir : str or Path
+        Folder holding the fMRI and behavioural derivatives.
+    subject : str
+        Subject label, without the "sub-" prefix.
+    task_label : str
+        Task label of the behavioural files.
+
+    Returns
+    -------
+    dict
+        Session -> sorted list of ``(run, img, confounds)``. Sessions without
+        any valid run are left out.
+    """
+    by_ses_run = {}
+    for img, conf in zip(imgs, confounds):
+        entities = parse_bids_filename(img)["entities"]
+        by_ses_run[int(entities["ses"]), int(entities["run"])] = (img, conf)
+
+    session_runs = {}
+    for ses in sorted(get_fmri_sessions(derivatives_dir, subject)):
+        beh_runs = get_subject_session_runs_beh(
+            derivatives_dir, subject, ses, task_label
+        )
+        runs = [
+            (run, *by_ses_run[s, run])
+            for s, run in sorted(by_ses_run)
+            if s == ses and run in beh_runs
+        ]
+        if runs:
+            session_runs[ses] = runs
+    return session_runs
+
+
+def load_surface_run(
+    path, mesh, mesh_name="fsaverage5", space_label="MNI152NLin2009cAsym"
+) -> SurfaceImage:
+    """Load the surface pair matching a volumetric preprocessed image path.
+
+    The ``freesurfer`` files store data as (time, vertices), hence the
+    transpose.
+    """
+    surf = path.replace("/func/", "/freesurfer/").replace(
+        f"_space-{space_label}", ""
+    )
+    data = {
+        hemi: load_surf_data(
+            surf.replace(".nii.gz", f"_{mesh_name}_{h}.gii")
+        ).T
+        for hemi, h in [("left", "lh"), ("right", "rh")]
+    }
+    return SurfaceImage(mesh=mesh, data=data)
+
+
+def make_design_matrix(events, confounds, model) -> pd.DataFrame:
+    """Build the design matrix of one run.
+
+    Parameters
+    ----------
+    events : pd.DataFrame
+        nilearn events table (``onset``, ``duration``, ``trial_type``, and
+        optionally ``modulation``).
+    confounds : pd.DataFrame
+        One row per scan; missing values are set to 0.
+    model : FirstLevelModel
+        Provides the timing (``t_r``, ``slice_time_ref``), HRF and drift
+        parameters.
+
+    Returns
+    -------
+    pd.DataFrame
+        Design matrix, one row per scan.
+    """
+    scans = np.arange(len(confounds))
+    frame_times = (scans + model.slice_time_ref) * model.t_r
+    confounds = confounds.fillna(0)
+    return make_first_level_design_matrix(
+        frame_times=frame_times,
+        events=events,
+        hrf_model=model.hrf_model,
+        drift_model=model.drift_model,
+        high_pass=model.high_pass,
+        drift_order=model.drift_order,
+        fir_delays=model.fir_delays,
+        add_regs=confounds.to_numpy(),
+        add_reg_names=confounds.columns.tolist(),
+        min_onset=model.min_onset,
+    )
+
+
+def save_design_matrix(design_matrix, output_dir):
+    """Save a design matrix as ``design_matrix.tsv`` and ``.png``."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    design_matrix.to_csv(output_dir / "design_matrix.tsv", sep="\t")
+    plot_design_matrix(
+        design_matrix,
+        rescale=True,
+        output_file=str(output_dir / "design_matrix.png"),
+    )
+
+
+def save_contrasts(
+    model,
+    contrasts,
+    output_dir,
+    output_types=("effect_size", "effect_variance", "z_score"),
+):
+    """Save each contrast map as ``quantity-<name>_stat-<type>.gii``."""
+    for name, expression in contrasts.items():
+        for output_type in output_types:
+            stat_map = model.compute_contrast(
+                expression, output_type=output_type
+            )
+            stat_map.data.to_filename(
+                Path(output_dir) / f"quantity-{name}_stat-{output_type}.gii"
+            )

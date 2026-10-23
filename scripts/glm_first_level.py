@@ -1,4 +1,16 @@
 # %%
+"""First-level GLM of the ExplorePlus task on the fsaverage surface.
+
+Three stages, run per subject and session:
+
+1. events: ideal-observer quantities -> nilearn events table per run
+2. design matrix: events + confounds -> design matrix per run
+3. GLM: fit all runs of the session, save the contrast maps
+
+Generic fMRI helpers (run selection, surface loading, design matrix, saving)
+live in :mod:`exd.fmri_utils`; this script holds the task-specific parts.
+"""
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,19 +18,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from nilearn.datasets import load_fsaverage
-from nilearn.glm.first_level import (
-    make_first_level_design_matrix,
-)
 from nilearn.glm.first_level.first_level import _list_valid_subjects
-from nilearn.plotting import plot_design_matrix
-from nilearn.surface import SurfaceImage, load_surf_data
 from tqdm import tqdm
 
 from exd.events import get_run_events
 from exd.fmri_utils import (
     first_level_from_bids,
-    get_fmri_sessions,
-    get_subject_session_runs_beh,
+    get_session_runs,
+    load_surface_run,
+    make_design_matrix,
+    save_contrasts,
+    save_design_matrix,
 )
 from exd.models.ideal_observer import (
     ConfidenceEstimator,
@@ -29,14 +39,34 @@ from exd.models.ideal_observer import (
 )
 from exd.models.motor import MotorEstimator
 
-# GLOBALS
+# Paths
+DATA_DIR = Path(
+    "/home/plbarbarant/nasShare/projects/protocols/"
+    "ExplorePlus_MeynielPaunovRaglio_2024"
+)
+DERIVATIVES_FOLDER = "derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0"
 OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs")
+TASK_LABEL = "ExplorePlus"
 
+# Ideal observer
 LATENT_LEVELS = [20, 40, 60, 80]
 LEARNING_PARAMS = {"vol": 0.0416}
 OPTION_COLS = ["obsA", "obsB"]
 OUTCOME_RANGE = (1, 100)
+CHOICE_COL = "arm_choice"
+
+# GLM
+T_R = 1.71
+SMOOTHING_FWHM = 3.0
+HIGH_PASS = 1 / 128
+HRF_MODEL = "spm + derivative"
+CONFOUNDS_STRATEGY = ["motion", "global_signal"]
+N_JOBS = 10
+VERBOSE = 10
+
+# Surface
 MESH_NAME = "fsaverage5"
+VOLUME_SPACE = "MNI152NLin2009cAsym"
 
 # Onsets the regressors lock to; loaded once per run.
 ONSETS = ["cue", "outcome", "RT"]
@@ -53,7 +83,11 @@ CONTRASTS = {
     "Er": "Er",
     "motor-LminusR": "Motor",
 }
+OUTPUT_TYPES = ("effect_size", "effect_variance", "z_score")
 
+
+# %%
+# Events
 
 # Maps (estimator predictions, events) -> one modulation value per trial.
 ModulationFn = Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]
@@ -61,12 +95,7 @@ ModulationFn = Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]
 
 @dataclass(frozen=True)
 class Regressor:
-    """One parametric regressor: which events it locks to, and how it is modulated.
-
-    The unmodulated regressor of each onset is added once in
-    `make_full_design_matrix`, not per Regressor, and the modulation is
-    mean-centred in `regressor_events`.
-    """
+    """Parametric regressor: the onset it locks to and its modulation."""
 
     name: str
     onset: str
@@ -74,38 +103,29 @@ class Regressor:
     modulation: ModulationFn
 
 
-def sum_over_options(prefix: str) -> ModulationFn:
+def _sum_over_options(prefix: str) -> ModulationFn:
     """Sum an estimator output over options, e.g. Pe__obsA + Pe__obsB."""
     cols = [f"{prefix}__{opt}" for opt in OPTION_COLS]
     return lambda pred, events: pred[cols].sum(axis=1).to_numpy()
 
 
-def signed_option_difference(
-    prefix: str,
-    choice_col: str = "arm_choice",
-) -> ModulationFn:
-    """Difference between options, signed so it is always (chosen - unchosen)."""
+def _signed_option_difference(prefix: str) -> ModulationFn:
+    """Difference between options, signed as (chosen - unchosen)."""
+    col_a, col_b = (f"{prefix}__{opt}" for opt in OPTION_COLS)
 
-    def fn(pred: pd.DataFrame, events: pd.DataFrame) -> np.ndarray:
-        diff = (
-            pred[f"{prefix}__{OPTION_COLS[0]}"]
-            - pred[f"{prefix}__{OPTION_COLS[1]}"]
-        )
-        sign = np.where(events[choice_col].eq("A"), 1, -1)
-        return diff.to_numpy() * sign
+    def fn(pred, events):
+        sign = np.where(events[CHOICE_COL].eq("A"), 1, -1)
+        return (pred[col_a] - pred[col_b]).to_numpy() * sign
 
     return fn
 
 
-def signed_motor_response(
-    pred: pd.DataFrame,
-    events: pd.DataFrame,
-) -> np.ndarray:
+def _signed_motor_response(pred, events) -> np.ndarray:
     """+1 for a left response, -1 for a right response."""
     return pred["trial_type"].map({"L": 1.0, "R": -1.0}).fillna(0).to_numpy()
 
 
-def make_regressors(sd: float) -> list[Regressor]:
+def _make_regressors(sd: float) -> list[Regressor]:
     shared = {
         "latent_levels": LATENT_LEVELS,
         "sd": sd,
@@ -117,31 +137,31 @@ def make_regressors(sd: float) -> list[Regressor]:
             "Pe",
             "outcome",
             PredictionErrorEstimator(**shared),
-            sum_over_options("Pe"),
+            _sum_over_options("Pe"),
         ),
         Regressor(
             "Surprise",
             "outcome",
             SurpriseEstimator(**shared, outcome_range=OUTCOME_RANGE),
-            sum_over_options("Surprise"),
+            _sum_over_options("Surprise"),
         ),
         Regressor(
             "Conf_ch",
             "outcome",
             ConfidenceEstimator(**shared),
-            sum_over_options("Conf_ch"),
+            _sum_over_options("Conf_ch"),
         ),
         Regressor(
             "Conf_unch",
             "outcome",
             UnchosenConfidenceEstimator(**shared),
-            sum_over_options("Conf_unch"),
+            _sum_over_options("Conf_unch"),
         ),
         Regressor(
             "Er",
             "cue",
             IdealObserverEstimator(**shared, outcome_range=OUTCOME_RANGE),
-            signed_option_difference("IO"),
+            _signed_option_difference("IO"),
         ),
         # Signed rather than categorical L/R: L + R would rebuild the RT onset
         # regressor, which is collinear with the cue one
@@ -149,16 +169,21 @@ def make_regressors(sd: float) -> list[Regressor]:
             "Motor",
             "RT",
             MotorEstimator(option_cols=OPTION_COLS),
-            signed_motor_response,
+            _signed_motor_response,
         ),
     ]
 
 
-def regressor_events(
-    regressor: Regressor,
-    events: pd.DataFrame,
+def _onset_events(onset: str, events: pd.DataFrame) -> pd.DataFrame:
+    """Unmodulated regressor shared by every quantity locked to `onset`."""
+    base = events[["onset", "duration"]]
+    return base.assign(trial_type=onset, modulation=1.0)
+
+
+def _regressor_events(
+    regressor: Regressor, events: pd.DataFrame
 ) -> pd.DataFrame:
-    """Expand one Regressor into nilearn-style event rows.
+    """Modulated rows of one regressor.
 
     The modulation is mean-centred within the run (nilearn does not do it).
     Otherwise its mean acts as a scaled copy of the unmodulated onset
@@ -173,193 +198,101 @@ def regressor_events(
     )
 
 
-def onset_events(onset: str, events: pd.DataFrame) -> pd.DataFrame:
-    """Unmodulated regressor shared by every quantity locked to `onset`."""
-    return events[["onset", "duration"]].assign(
-        trial_type=onset,
-        modulation=1.0,
-    )
+def make_events(derivatives_dir, subject, ses, run) -> pd.DataFrame:
+    """Build the nilearn events table of one run.
 
+    Parameters
+    ----------
+    derivatives_dir : str or Path
+        Folder holding the formatted behavioural files.
+    subject : str
+        Subject label, without the "sub-" prefix.
+    ses, run : int
+        Session and run indices.
 
-def make_full_design_matrix(
-    model,
-    confounds: pd.DataFrame,
-    derivatives_dir: str,
-    subject: str,
-    ses: int,
-    run: int,
-) -> pd.DataFrame:
-    """Build one design matrix containing every quantity for a single run."""
-    events_by_onset = {
-        onset: get_run_events(
-            derivatives_dir,
-            sub=subject,
-            ses=ses,
-            run=run,
-            onset=onset,
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``onset``, ``duration``, ``trial_type`` and ``modulation``:
+        one unmodulated regressor per onset in ``UNMODULATED_ONSETS`` and one
+        mean-centred parametric regressor per quantity.
+    """
+    # Trial table time-locked to each onset
+    trials = {}
+    for onset in ONSETS:
+        trials[onset] = get_run_events(
+            derivatives_dir, sub=subject, ses=ses, run=run, onset=onset
         )
-        for onset in ONSETS
-    }
+    sd = trials["outcome"]["SD"].unique()[0]
 
-    sd = events_by_onset["outcome"]["SD"].unique()[0]
-    regressors = make_regressors(sd)
-
-    events = pd.concat(
-        [onset_events(o, events_by_onset[o]) for o in UNMODULATED_ONSETS]
-        + [regressor_events(r, events_by_onset[r.onset]) for r in regressors],
-        ignore_index=True,
-    )
-
-    n_scans = len(confounds)
-    frame_times = (np.arange(n_scans) + model.slice_time_ref) * model.t_r
-    confounds = confounds.fillna(0)
-
-    return make_first_level_design_matrix(
-        frame_times=frame_times,
-        events=events,
-        hrf_model=model.hrf_model,
-        drift_model=model.drift_model,
-        high_pass=model.high_pass,
-        drift_order=model.drift_order,
-        fir_delays=model.fir_delays,
-        add_regs=confounds.to_numpy(),
-        add_reg_names=confounds.columns.tolist(),
-        min_onset=model.min_onset,
-    )
+    events = []
+    for onset in UNMODULATED_ONSETS:
+        events.append(_onset_events(onset, trials[onset]))
+    for regressor in _make_regressors(sd):
+        events.append(_regressor_events(regressor, trials[regressor.onset]))
+    return pd.concat(events, ignore_index=True)
 
 
-def parse_ses_run(path: str) -> tuple[int, int]:
-    return (
-        int(path.split("ses-")[1].split("/", maxsplit=1)[0]),
-        int(path.split("run-")[1].split("_", maxsplit=1)[0]),
-    )
-
-
-def load_surface_run(path: str, mesh) -> SurfaceImage:
-    """Load the fsaverage5 surface pair matching a volumetric preproc path."""
-    surf = path.replace("/func/", "/freesurfer/").replace(
-        "_space-MNI152NLin2009cAsym",
-        "",
-    )
-    data = {
-        "left": load_surf_data(
-            surf.replace(".nii.gz", f"_{MESH_NAME}_lh.gii"),
-        ).T,
-        "right": load_surf_data(
-            surf.replace(".nii.gz", f"_{MESH_NAME}_rh.gii"),
-        ).T,
-    }
-    return SurfaceImage(mesh=mesh, data=data)
+# %%
+# GLM
 
 
 def first_level_analysis(
-    data_dir,
-    derivatives_folder,
-    task_label,
-    subjects,
-    contrasts=CONTRASTS,
-    output_root=OUTPUT_ROOT,
+    subjects, contrasts=CONTRASTS, output_root=OUTPUT_ROOT
 ):
-    derivatives_dir = str(Path(data_dir) / derivatives_folder)
+    """Fit one first-level model per subject and session, save contrasts.
+
+    Parameters
+    ----------
+    subjects : list of str
+        Subject labels, without the "sub-" prefix.
+    contrasts : dict, default=CONTRASTS
+        Output name -> contrast expression.
+    output_root : Path, default=OUTPUT_ROOT
+        Maps go to ``sub-<label>/ses-<ses>/``, design matrices to
+        ``sub-<label>/ses-<ses>/run-<run>/``.
+    """
+    derivatives_dir = DATA_DIR / DERIVATIVES_FOLDER
     models, imgs_all, _, confounds_all = first_level_from_bids(
-        data_dir,
-        task_label,
-        space_label=None,
+        DATA_DIR,
+        TASK_LABEL,
+        space_label=VOLUME_SPACE,
         sub_labels=subjects,
-        smoothing_fwhm=3.0,
-        high_pass=1 / 128,
-        t_r=1.71,
-        hrf_model="spm + derivative",
-        derivatives_folder=derivatives_folder,
-        confounds_strategy=["motion", "global_signal"],
-        n_jobs=10,
-        verbose=10,
+        smoothing_fwhm=SMOOTHING_FWHM,
+        high_pass=HIGH_PASS,
+        t_r=T_R,
+        hrf_model=HRF_MODEL,
+        derivatives_folder=DERIVATIVES_FOLDER,
+        confounds_strategy=CONFOUNDS_STRATEGY,
+        n_jobs=N_JOBS,
+        verbose=VERBOSE,
     )
     mesh = load_fsaverage(MESH_NAME)["pial"]
 
-    for model, run_imgs, run_confounds, subject in zip(
-        tqdm(models, desc="subject"),
-        imgs_all,
-        confounds_all,
-        subjects,
+    for model, imgs, confounds, subject in zip(
+        tqdm(models, desc="subject"), imgs_all, confounds_all, subjects
     ):
-        # (ses, run) -> (image path, confounds table)
-        run_map = {
-            parse_ses_run(p): (p, c) for p, c in zip(run_imgs, run_confounds)
-        }
-
-        for ses in sorted(
-            get_fmri_sessions(derivatives_dir, subject),
-        ):
-            beh_runs = get_subject_session_runs_beh(
-                derivatives_dir,
-                subject,
-                ses,
-                task_label,
-            )
-            # Keep only runs that have both images and behavioural data
-            keys = sorted(
-                k for k in run_map if k[0] == ses and k[1] in beh_runs
-            )
-            if not keys:
-                continue
-
+        session_runs = get_session_runs(
+            imgs, confounds, derivatives_dir, subject, TASK_LABEL
+        )
+        for ses, runs in session_runs.items():
             output_ses = output_root / f"sub-{subject}" / f"ses-{ses}"
-            output_ses.mkdir(parents=True, exist_ok=True)
 
             design_matrices, surf_imgs = [], []
-            for _, run in keys:
-                img_path, confounds = run_map[(ses, run)]
-                dmtx = make_full_design_matrix(
-                    model,
-                    confounds,
-                    derivatives_dir,
-                    subject,
-                    ses,
-                    run,
-                )
-
-                output_run = output_ses / f"run-{run}"
-                output_run.mkdir(parents=True, exist_ok=True)
-                dmtx.to_csv(output_run / "design_matrix.tsv", sep="\t")
-                plot_design_matrix(
-                    dmtx,
-                    rescale=True,
-                    output_file=str(output_run / "design_matrix.png"),
-                )
-
+            for run, img_path, run_confounds in runs:
+                events = make_events(derivatives_dir, subject, ses, run)
+                dmtx = make_design_matrix(events, run_confounds, model)
+                save_design_matrix(dmtx, output_ses / f"run-{run}")
                 design_matrices.append(dmtx)
-                surf_imgs.append(load_surface_run(img_path, mesh))
+                surf_imgs.append(
+                    load_surface_run(img_path, mesh, MESH_NAME, VOLUME_SPACE)
+                )
 
             model.fit(run_imgs=surf_imgs, design_matrices=design_matrices)
-
-            # Save statistical maps
-            for name, expression in contrasts.items():
-                for output_type in [
-                    "effect_size",
-                    "effect_variance",
-                    "z_score",
-                ]:
-                    stat_map = model.compute_contrast(
-                        expression,
-                        output_type=output_type,
-                    )
-                    stat_map.data.to_filename(
-                        output_ses / f"quantity-{name}_stat-{output_type}.gii",
-                    )
+            save_contrasts(model, contrasts, output_ses, OUTPUT_TYPES)
 
 
 if __name__ == "__main__":
-    data_dir = Path(
-        "/home/plbarbarant/nasShare/projects/protocols/ExplorePlus_MeynielPaunovRaglio_2024",
-    )
-    derivatives_folder = "derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0"
-    subjects = _list_valid_subjects(str(data_dir / derivatives_folder), None)[
-        :1
-    ]
-    first_level_analysis(
-        data_dir=data_dir,
-        derivatives_folder="derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0",
-        task_label="ExplorePlus",
-        subjects=subjects,
-    )
+    derivatives_dir = str(DATA_DIR / DERIVATIVES_FOLDER)
+    subjects = _list_valid_subjects(derivatives_dir, None)[:1]
+    first_level_analysis(subjects)
