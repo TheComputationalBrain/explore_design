@@ -78,7 +78,11 @@ def _get_single_vol(
         expectation = latent_levels @ prior
         pe = obs - expectation
         sign = (
-            "pos" if pe > 0 else "neg" if pe < 0 else np.random.choice(["pos", "neg"])
+            "pos"
+            if pe > 0
+            else "neg"
+            if pe < 0
+            else np.random.choice(["pos", "neg"])
         )
         mask &= spec["PE.sign"] == sign
 
@@ -90,7 +94,11 @@ def _get_single_vol(
         expectation = outcome_values @ outcome_prior
         pe = obs - expectation
         sign = (
-            "pos" if pe > 0 else "neg" if pe < 0 else np.random.choice(["pos", "neg"])
+            "pos"
+            if pe > 0
+            else "neg"
+            if pe < 0
+            else np.random.choice(["pos", "neg"])
         )
         mask &= spec["PEO.sign"] == sign
 
@@ -102,7 +110,9 @@ def _get_single_vol(
     return float(spec.loc[mask, "param"].values[0])
 
 
-def _latent2outcome(lat_dist, latent_levels, outcome_values, sd, normalize=True):
+def _latent2outcome(
+    lat_dist, latent_levels, outcome_values, sd, normalize=True
+):
     """Mixture of Gaussians: sum_k P(level_k) * N(outcome | level_k, sd)"""
     out = np.stack(
         [sps.norm.pdf(outcome_values, loc=lv, scale=sd) for lv in latent_levels]
@@ -166,8 +176,12 @@ def ideal_observer(
             prior = pred_post[:, iopt, itrial]
             o = obs[iopt, itrial]
             s = sd[iopt, itrial]
-            trial_cond = conditions.loc[itrial] if conditions is not None else None
-            outcome_prior = pred_out[:, iopt, itrial] if return_outcome_dist else None
+            trial_cond = (
+                conditions.loc[itrial] if conditions is not None else None
+            )
+            outcome_prior = (
+                pred_out[:, iopt, itrial] if return_outcome_dist else None
+            )
 
             vol = _get_single_vol(
                 spec,
@@ -187,13 +201,24 @@ def ideal_observer(
 
             if return_outcome_dist:
                 prev_out[:, iopt, itrial + 1] = _latent2outcome(
-                    post, latent_levels, outcome_values, s, normalize_outcome_dist
+                    post,
+                    latent_levels,
+                    outcome_values,
+                    s,
+                    normalize_outcome_dist,
                 )
                 pred_out[:, iopt, itrial + 1] = _latent2outcome(
-                    next_prior, latent_levels, outcome_values, s, normalize_outcome_dist
+                    next_prior,
+                    latent_levels,
+                    outcome_values,
+                    s,
+                    normalize_outcome_dist,
                 )
 
-    posteriors = {"predictive_posterior": pred_post, "prevol_posterior": prev_post}
+    posteriors = {
+        "predictive_posterior": pred_post,
+        "prevol_posterior": prev_post,
+    }
     if return_outcome_dist:
         posteriors["predictive_outcome_distribution"] = pred_out
         posteriors["prevol_outcome_distribution"] = prev_out
@@ -277,7 +302,9 @@ class IdealObserverEstimator(BaseEstimator):
         pred = self.posteriors_["predictive_posterior"][
             :, :, :-1
         ]  # (n_levels, n_options, n_trials)
-        expectations = np.einsum("l,lot->ot", levels, pred).T  # (n_trials, n_options)
+        expectations = np.einsum(
+            "l,lot->ot", levels, pred
+        ).T  # (n_trials, n_options)
         cols = ["IO__" + c for c in self.option_cols_]
         return pd.DataFrame(expectations, columns=cols, index=X.index)
 
@@ -286,10 +313,7 @@ class IdealObserverEstimator(BaseEstimator):
 
 
 def set_unobserved_value(quantity, unobserved_value=0):
-    if isinstance(unobserved_value, int):
-        quantity[np.isnan(quantity)] = unobserved_value
-    else:
-        quantity[quantity == 0] = np.nan
+    quantity[np.isnan(quantity)] = unobserved_value
     return quantity
 
 
@@ -297,7 +321,9 @@ def get_missing(obs):
     return np.where(np.all(np.isnan(obs), axis=0))[0]
 
 
-def get_outcome_surprise(outcome_distribution, obs, outcome_range, unobserved_value=0):
+def get_outcome_surprise(
+    outcome_distribution, obs, outcome_range, unobserved_value=0
+):
     n_options, n_trials = obs.shape
     surprise = np.full((n_options, n_trials), np.nan)
     for iopt in range(n_options):
@@ -358,7 +384,9 @@ class SurpriseEstimator(IdealObserverEstimator):
         obs, _ = self._parse_X(X)
         # predictive_outcome_distribution[:,  :, 1:] aligns index 0 with trial 0
         # (the distribution formed before seeing trial t's outcome)
-        out_dist = self.posteriors_["predictive_outcome_distribution"][:, :, :-1]
+        out_dist = self.posteriors_["predictive_outcome_distribution"][
+            :, :, :-1
+        ]
         surprise = get_outcome_surprise(
             out_dist, obs, self.outcome_range, self.unobserved_value
         )
@@ -409,7 +437,9 @@ class UncertaintyEstimator(IdealObserverEstimator):
         for iopt in range(n_options):
             for itrial in range(n_trials):
                 if ~np.isnan(obs[iopt, itrial]):
-                    uncertainty[iopt, itrial] = 1 - np.max(prevol[:, iopt, itrial])
+                    uncertainty[iopt, itrial] = 1 - np.max(
+                        prevol[:, iopt, itrial]
+                    )
 
         uncertainty = set_unobserved_value(uncertainty, self.unobserved_value)
         uncertainty[:, get_missing(obs)] = np.nan
@@ -467,7 +497,9 @@ class PredictionErrorEstimator(IdealObserverEstimator):
         pred = self.posteriors_["predictive_posterior"][
             :, :, :-1
         ]  # (n_levels, n_options, n_trials)
-        expectations = np.einsum("l,lot->ot", levels, pred)  # (n_options, n_trials)
+        expectations = np.einsum(
+            "l,lot->ot", levels, pred
+        )  # (n_options, n_trials)
 
         pe = obs - expectations
         pe = set_unobserved_value(pe, self.unobserved_value)
@@ -500,6 +532,9 @@ class ConfidenceEstimator(IdealObserverEstimator):
         estimators in this module).
     All other parameters inherited from IdealObserverEstimator.
     """
+
+    _chosen = True
+    _prefix = "Conf_ch__"
 
     def __init__(
         self,
@@ -537,7 +572,7 @@ class ConfidenceEstimator(IdealObserverEstimator):
         confidence = np.full((n_options, n_trials), np.nan)
         for iopt in range(n_options):
             for itrial in range(n_trials):
-                if ~np.isnan(obs[iopt, itrial]):
+                if np.isnan(obs[iopt, itrial]) != self._chosen:
                     p = pred[:, iopt, itrial]
                     mean = levels @ p
                     var = float((levels**2) @ p) - mean**2
@@ -548,5 +583,16 @@ class ConfidenceEstimator(IdealObserverEstimator):
         confidence = set_unobserved_value(confidence, self.unobserved_value)
         confidence[:, get_missing(obs)] = np.nan
 
-        cols = ["Confidence__" + c for c in self.option_cols_]
+        cols = [self._prefix + c for c in self.option_cols_]
         return pd.DataFrame(confidence.T, columns=cols, index=X.index)
+
+
+class UnchosenConfidenceEstimator(ConfidenceEstimator):
+    """
+    Same as ConfidenceEstimator, but the confidence is returned for the
+    unchosen option(s) on each trial; the chosen option is filled with
+    unobserved_value.
+    """
+
+    _chosen = False
+    _prefix = "Conf_unch__"
