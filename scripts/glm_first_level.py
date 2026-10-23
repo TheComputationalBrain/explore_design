@@ -40,6 +40,9 @@ MESH_NAME = "fsaverage5"
 
 # Onsets the regressors lock to; loaded once per run.
 ONSETS = ["cue", "outcome", "RT"]
+# Onsets that get an unmodulated regressor. RT is left out: responses follow
+# the cue closely, so its regressor is highly collinear with the cue one.
+UNMODULATED_ONSETS = ["cue", "outcome"]
 
 # Contrasts computed from every fit. Keys become output filenames.
 CONTRASTS = {
@@ -48,7 +51,7 @@ CONTRASTS = {
     "Conf_ch": "Conf_ch",
     "Conf_unch": "Conf_unch",
     "Er": "Er",
-    "motor-LminusR": "L - R",
+    "motor-LminusR": "Motor",
 }
 
 
@@ -58,16 +61,17 @@ ModulationFn = Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]
 
 @dataclass(frozen=True)
 class Regressor:
-    """One regressor family: which events it locks to, and how it is modulated.
+    """One parametric regressor: which events it locks to, and how it is modulated.
 
-    `modulation=None` means a categorical regressor: the estimator returns trial
-    labels (e.g. "L"/"R"), which become one column each.
+    The unmodulated regressor of each onset is added once in
+    `make_full_design_matrix`, not per Regressor, and the modulation is
+    mean-centred in `regressor_events`.
     """
 
     name: str
     onset: str
     estimator: object
-    modulation: ModulationFn | None = None
+    modulation: ModulationFn
 
 
 def sum_over_options(prefix: str) -> ModulationFn:
@@ -91,6 +95,14 @@ def signed_option_difference(
         return diff.to_numpy() * sign
 
     return fn
+
+
+def signed_motor_response(
+    pred: pd.DataFrame,
+    events: pd.DataFrame,
+) -> np.ndarray:
+    """+1 for a left response, -1 for a right response."""
+    return pred["trial_type"].map({"L": 1.0, "R": -1.0}).fillna(0).to_numpy()
 
 
 def make_regressors(sd: float) -> list[Regressor]:
@@ -131,7 +143,14 @@ def make_regressors(sd: float) -> list[Regressor]:
             IdealObserverEstimator(**shared, outcome_range=OUTCOME_RANGE),
             signed_option_difference("IO"),
         ),
-        Regressor("Motor", "RT", MotorEstimator(option_cols=OPTION_COLS)),
+        # Signed rather than categorical L/R: L + R would rebuild the RT onset
+        # regressor, which is collinear with the cue one
+        Regressor(
+            "Motor",
+            "RT",
+            MotorEstimator(option_cols=OPTION_COLS),
+            signed_motor_response,
+        ),
     ]
 
 
@@ -139,27 +158,26 @@ def regressor_events(
     regressor: Regressor,
     events: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Expand one Regressor into nilearn-style event rows."""
-    base = events[["onset", "duration"]]
+    """Expand one Regressor into nilearn-style event rows.
 
-    if regressor.modulation is None:
-        return base.assign(
-            trial_type=regressor.estimator.fit_predict(events),
-            modulation=1.0,
-        )
-
+    The modulation is mean-centred within the run (nilearn does not do it).
+    Otherwise its mean acts as a scaled copy of the unmodulated onset
+    regressor, making the two strongly collinear and the onset beta absorb
+    part of the parametric effect.
+    """
     pred = regressor.estimator.fit_predict(events)
-    return pd.concat(
-        [
-            base.assign(
-                trial_type=f"{regressor.name}_no_modulation",
-                modulation=1.0,
-            ),
-            base.assign(
-                trial_type=regressor.name,
-                modulation=regressor.modulation(pred, events),
-            ),
-        ],
+    modulation = regressor.modulation(pred, events)
+    return events[["onset", "duration"]].assign(
+        trial_type=regressor.name,
+        modulation=modulation - modulation.mean(),
+    )
+
+
+def onset_events(onset: str, events: pd.DataFrame) -> pd.DataFrame:
+    """Unmodulated regressor shared by every quantity locked to `onset`."""
+    return events[["onset", "duration"]].assign(
+        trial_type=onset,
+        modulation=1.0,
     )
 
 
@@ -187,7 +205,8 @@ def make_full_design_matrix(
     regressors = make_regressors(sd)
 
     events = pd.concat(
-        [regressor_events(r, events_by_onset[r.onset]) for r in regressors],
+        [onset_events(o, events_by_onset[o]) for o in UNMODULATED_ONSETS]
+        + [regressor_events(r, events_by_onset[r.onset]) for r in regressors],
         ignore_index=True,
     )
 
@@ -335,7 +354,9 @@ if __name__ == "__main__":
         "/home/plbarbarant/nasShare/projects/protocols/ExplorePlus_MeynielPaunovRaglio_2024",
     )
     derivatives_folder = "derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0"
-    subjects = _list_valid_subjects(str(data_dir / derivatives_folder), None)
+    subjects = _list_valid_subjects(str(data_dir / derivatives_folder), None)[
+        :1
+    ]
     first_level_analysis(
         data_dir=data_dir,
         derivatives_folder="derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0",
