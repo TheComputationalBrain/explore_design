@@ -10,7 +10,9 @@ from exd.models.ideal_observer import ConfidenceEstimator
 derivatives_dir = Path(
     "/home/plbarbarant/nasShare/projects/protocols/ExplorePlus_MeynielPaunovRaglio_2024/derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0"
 )
-events = get_run_events(derivatives_dir, sub="05", ses=2, run=2, onset="outcome")
+events = get_run_events(
+    derivatives_dir, sub="01", ses=2, run=1, onset="outcome"
+)
 estimator = ConfidenceEstimator(
     latent_levels=[20, 40, 60, 80],
     sd=events["SD"].unique()[0],
@@ -43,8 +45,8 @@ COL_B = "#3A86C8"  # option B — mid blue
 ALPHA_S = 0.75  # stem marker alpha
 
 # ── Data ───────────────────────────────────────────────────────────────────
-conf_A = conf_df["Conf__obsA"]
-conf_B = conf_df["Conf__obsB"]
+conf_A = conf_df["Confidence__obsA"] * -3
+conf_B = conf_df["Confidence__obsB"] * -3
 mean_A = events["A_mean"]
 mean_B = events["B_mean"]
 trials = np.arange(len(conf_A))
@@ -59,16 +61,30 @@ def _stem(ax, x, y, color, label, zorder=2):
         x[mask], y[mask], linefmt=color, markerfmt="o", basefmt=" ", label=label
     )
     plt.setp(stemlines, linewidth=0.9, alpha=ALPHA_S, color=color)
-    plt.setp(markerline, markersize=4, alpha=ALPHA_S, color=color, zorder=zorder)
+    plt.setp(
+        markerline, markersize=4, alpha=ALPHA_S, color=color, zorder=zorder
+    )
 
 
 _stem(ax, trials, conf_A.values, COL_A, "Conf — option A")
 _stem(ax, trials, conf_B.values, COL_B, "Conf — option B", zorder=3)
 ax.plot(
-    trials, mean_A, color=COL_A, lw=1.6, ls="--", label="True mean — option A", zorder=4
+    trials,
+    mean_A,
+    color=COL_A,
+    lw=1.6,
+    ls="--",
+    label="True mean — option A",
+    zorder=4,
 )
 ax.plot(
-    trials, mean_B, color=COL_B, lw=1.6, ls="--", label="True mean — option B", zorder=4
+    trials,
+    mean_B,
+    color=COL_B,
+    lw=1.6,
+    ls="--",
+    label="True mean — option B",
+    zorder=4,
 )
 
 
@@ -83,6 +99,7 @@ leg = ax.legend(
 
 fig.tight_layout()
 fig.savefig(
-    "/home/plbarbarant/repos/explore_design/outputs/Conf.png", bbox_inches="tight"
+    "/home/plbarbarant/repos/explore_design/outputs/Conf.png",
+    bbox_inches="tight",
 )
 plt.show()
