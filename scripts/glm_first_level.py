@@ -25,7 +25,7 @@ from exd.models.ideal_observer import (
     IdealObserverEstimator,
     PredictionErrorEstimator,
     SurpriseEstimator,
-    UncertaintyEstimator,
+    UnchosenConfidenceEstimator,
 )
 from exd.models.motor import MotorEstimator
 
@@ -45,9 +45,9 @@ ONSETS = ["cue", "outcome", "RT"]
 CONTRASTS = {
     "Pe": "Pe",
     "Surprise": "Surprise",
-    "Confidence": "Confidence",
+    "Conf_ch": "Conf_ch",
+    "Conf_unch": "Conf_unch",
     "Er": "Er",
-    "Eu_ch": "Eu_ch",
     "motor-LminusR": "L - R",
 }
 
@@ -114,22 +114,22 @@ def make_regressors(sd: float) -> list[Regressor]:
             sum_over_options("Surprise"),
         ),
         Regressor(
-            "Confidence",
+            "Conf_ch",
             "outcome",
             ConfidenceEstimator(**shared),
-            sum_over_options("Confidence"),
+            sum_over_options("Conf_ch"),
+        ),
+        Regressor(
+            "Conf_unch",
+            "outcome",
+            UnchosenConfidenceEstimator(**shared),
+            sum_over_options("Conf_unch"),
         ),
         Regressor(
             "Er",
             "cue",
             IdealObserverEstimator(**shared, outcome_range=OUTCOME_RANGE),
             signed_option_difference("IO"),
-        ),
-        Regressor(
-            "Eu_ch",
-            "outcome",
-            UncertaintyEstimator(**shared),
-            sum_over_options("Eu_ch"),
         ),
         Regressor("Motor", "RT", MotorEstimator(option_cols=OPTION_COLS)),
     ]
