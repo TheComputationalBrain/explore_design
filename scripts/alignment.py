@@ -16,7 +16,10 @@ from nilearn.datasets import fetch_atlas_surf_destrieux, load_fsaverage
 from nilearn.surface import InMemoryMesh, SurfaceImage, load_surf_data
 
 OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs")
-METHODS = ["identity", "procrustes", "spectral_ot"]
+# "spectral_ot_geometric" is SpectralOT with alpha=1 (anatomy only): it applies
+# the same entropic blur as SpectralOT without using the functional data, and
+# replaces "identity" as the smoothing-matched baseline
+METHODS = ["spectral_ot_geometric", "procrustes", "spectral_ot"]
 # Index of the session used to learn the alignment; the other one is aligned
 ALIGNMENT_SESSION = 0
 MESH_NAME = "fsaverage5"  # mesh of the first-level maps
@@ -52,7 +55,7 @@ def _load_session(ses_dir: Path, quantities, hemi) -> np.ndarray:
 
 
 def _make_aligner(method, hemi, mesh, labels) -> GroupAlignment:
-    if method == "spectral_ot":
+    if method in ("spectral_ot", "spectral_ot_geometric"):
         part = mesh.parts[HEMIS[hemi]]
         evecs = get_laplacian_embedding(
             InMemoryMesh(coordinates=part.coordinates, faces=part.faces),
@@ -62,7 +65,7 @@ def _make_aligner(method, hemi, mesh, labels) -> GroupAlignment:
             evecs=evecs,
             reg=SPECTRAL_REG,
             device=SPECTRAL_DEVICE,
-            alpha=SPECTRAL_ALPHA,
+            alpha=1.0 if method == "spectral_ot_geometric" else SPECTRAL_ALPHA,
             backend="geomloss",
         )
         labels = None
