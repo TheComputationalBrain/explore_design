@@ -22,9 +22,9 @@ OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs")
 CONDITIONS = [
     ("identity", None),
     ("identity", 6.0),
-    ("identity", 12.0),
-    ("procrustes", None),
+    ("spectral_ot_geometric", None),
     ("spectral_ot", None),
+    ("procrustes", None),
 ]
 MESH_NAME = "fsaverage5"  # mesh of the first-level maps
 ALPHA = 0.05
