@@ -27,8 +27,9 @@ from nilearn.datasets import (
     load_fsaverage,
     load_fsaverage_data,
 )
+from nilearn.image import smooth_img
 from nilearn.plotting import plot_surf_stat_map, show
-from nilearn.surface import InMemoryMesh, load_surf_data
+from nilearn.surface import InMemoryMesh, SurfaceImage, load_surf_data
 from sklearn.model_selection import KFold
 
 # KeOps (geomloss backend) needs the CUDA headers of the environment
@@ -36,7 +37,17 @@ os.environ.setdefault("CUDA_HOME", sys.prefix)
 
 OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs")
 # METHODS = ["identity"]
-METHODS = ["identity", "procrustes", "spectral_ot_geometric", "spectral_ot"]
+METHODS = [
+    "identity",
+    "identity_smoothed",
+    "procrustes",
+    "spectral_ot_geometric",
+    "spectral_ot",
+]
+# "identity_smoothed": identity, with the maps used for the prediction smoothed
+# with SMOOTHING_FWHM (the predicted subject's actual maps are not smoothed)
+# METHODS = ["identity", "identity_smoothed"]
+SMOOTHING_FWHM = 6.0
 MESH_NAME = "fsaverage5"  # mesh of the first-level maps
 N_JOBS = 10
 
@@ -84,6 +95,8 @@ def _make_aligner(method, hemi, mesh, labels) -> GroupAlignment:
             backend="geomloss",
         )
         labels = None
+    elif method == "identity_smoothed":
+        method = "identity"
     return GroupAlignment(
         method=method, labels=labels, scale_template=True, n_jobs=N_JOBS
     )
@@ -119,6 +132,28 @@ data = [
     }
     for i in range(2)
 ]
+if "identity_smoothed" in METHODS:
+    smoothed = []
+    for session in data:
+        imgs = smooth_img(
+            [
+                SurfaceImage(
+                    mesh=mesh,
+                    data={HEMIS[h]: session[h][s].T for h in HEMIS},
+                )
+                for s in subjects
+            ],
+            SMOOTHING_FWHM,
+        )
+        smoothed.append(
+            {
+                h: {
+                    s: np.asarray(img.data.parts[HEMIS[h]]).T
+                    for s, img in zip(subjects, imgs)
+                }
+                for h in HEMIS
+            }
+        )
 
 # %%
 # scores[method][hemi] -> (n_splits * n_test_subjects, n_vertices)
@@ -134,7 +169,8 @@ for align_ses in (0, 1):
                 aligner.fit(
                     {s: data[align_ses][hemi][s] for s in train}, y="template"
                 )
-                X_eval = {s: data[eval_ses][hemi][s] for s in train}
+                eval_data = smoothed if method == "identity_smoothed" else data
+                X_eval = {s: eval_data[eval_ses][hemi][s] for s in train}
                 for s in test:
                     y_pred = aligner.predict_subject(
                         X_eval, data[align_ses][hemi][s]
