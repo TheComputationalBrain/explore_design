@@ -137,6 +137,52 @@ def project_volume(subject, data_dir, derivatives_dir):
                 check=True,
             )
 
+            # fsaverage6
+            left_fsaverage6_fmri_tex = str(
+                fs_dir / (basename + "_fsaverage6_lh.gii")
+            )
+            right_fsaverage6_fmri_tex = str(
+                fs_dir / (basename + "_fsaverage6_rh.gii")
+            )
+
+            subprocess.run(
+                [
+                    f"{FSH}/bin/mri_surf2surf",
+                    "--srcsubject",
+                    f"sub-{subject}",
+                    "--srcsurfval",
+                    left_fmri_tex,
+                    "--trgsubject",
+                    "ico",
+                    "--trgicoorder",
+                    "6",
+                    "--trgsurfval",
+                    left_fsaverage6_fmri_tex,
+                    "--hemi",
+                    "lh",
+                ],
+                check=True,
+            )
+
+            subprocess.run(
+                [
+                    f"{FSH}/bin/mri_surf2surf",
+                    "--srcsubject",
+                    f"sub-{subject}",
+                    "--srcsurfval",
+                    right_fmri_tex,
+                    "--trgsubject",
+                    "ico",
+                    "--trgicoorder",
+                    "6",
+                    "--trgsurfval",
+                    right_fsaverage6_fmri_tex,
+                    "--hemi",
+                    "rh",
+                ],
+                check=True,
+            )
+
             # fsaverage5
             left_fsaverage5_fmri_tex = str(
                 fs_dir / (basename + "_fsaverage5_lh.gii")
@@ -188,6 +234,8 @@ def project_volume(subject, data_dir, derivatives_dir):
             collapse_gifti(right_fmri_tex)
             collapse_gifti(left_fsaverage7_fmri_tex)
             collapse_gifti(right_fsaverage7_fmri_tex)
+            collapse_gifti(left_fsaverage6_fmri_tex)
+            collapse_gifti(right_fsaverage6_fmri_tex)
             collapse_gifti(left_fsaverage5_fmri_tex)
             collapse_gifti(right_fsaverage5_fmri_tex)
 
