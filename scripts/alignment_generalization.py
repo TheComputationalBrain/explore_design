@@ -5,8 +5,12 @@ Subjects are split into two groups. A template is learned with fmralign on
 the first group, using one session as alignment data. Each subject of the
 second group is then aligned to this template with its own alignment session,
 and its maps of the other session are predicted from the first group
-(``GroupAlignment.predict_subject``). The prediction is scored at each vertex
-by the correlation, across quantities, with the subject's actual maps.
+(``GroupAlignment.predict_subject``).
+
+For each quantity, a one-sample second-level GLM (as in glm_second_level.py)
+is fit on the predicted maps of the second group, and another one on their
+actual maps (ground truth). The thresholded group z-maps are plotted side by
+side, one figure per split.
 
 Groups (2-fold split of the subjects) and sessions (alignment / evaluation)
 are swapped, which gives 4 splits.
@@ -17,39 +21,51 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import nibabel as nib
 import numpy as np
+import pandas as pd
 from fmralign import GroupAlignment
 from fmralign.embeddings.whole_brain import get_laplacian_embedding
 from fmralign.methods import SpectralOT
-from fmralign.metrics import score_voxelwise
 from nilearn.datasets import (
     fetch_atlas_surf_destrieux,
     load_fsaverage,
-    load_fsaverage_data,
 )
+from nilearn.glm import threshold_stats_img
+from nilearn.glm.second_level import SecondLevelModel
 from nilearn.image import smooth_img
-from nilearn.plotting import plot_surf_stat_map, show
+from nilearn.plotting import plot_surf_contours, plot_surf_stat_map, show
 from nilearn.surface import InMemoryMesh, SurfaceImage, load_surf_data
 from sklearn.model_selection import KFold
 
 # KeOps (geomloss backend) needs the CUDA headers of the environment
 os.environ.setdefault("CUDA_HOME", sys.prefix)
 
-OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs")
 # METHODS = ["identity"]
 METHODS = [
-    "identity",
-    "identity_smoothed",
+    # "identity",
+    # "identity_smoothed",
     "procrustes",
-    "spectral_ot_geometric",
-    "spectral_ot",
+    # "spectral_ot_geometric",
+    # "spectral_ot",
 ]
 # "identity_smoothed": identity, with the maps used for the prediction smoothed
 # with SMOOTHING_FWHM (the predicted subject's actual maps are not smoothed)
 # METHODS = ["identity", "identity_smoothed"]
 SMOOTHING_FWHM = 6.0
 MESH_NAME = "fsaverage5"  # mesh of the first-level maps
+OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs") / MESH_NAME
 N_JOBS = 10
+# Second-level thresholding
+ALPHA = 0.05
+HEIGHT_CONTROL = "fpr"
+# Display
+HEMI = "right"
+VIEW = "lateral"
+OUTLINE_COLOR = (0, 0, 0, 0.5)
+# Glasser HCP-MMP1 annotations on fsaverage; fsaverage5 vertices are the first
+# 10242 fsaverage vertices
+ATLAS_DIR = Path("/home/plbarbarant/repos/explore_design/data")
 
 # SpectralOT (whole hemisphere); the other methods are piecewise on Destrieux
 SPECTRAL_REG = 1e-4
@@ -94,12 +110,39 @@ def _make_aligner(method, hemi, mesh, labels) -> GroupAlignment:
             alpha=1.0 if method == "spectral_ot_geometric" else SPECTRAL_ALPHA,
             backend="geomloss",
         )
-        labels = None
     elif method == "identity_smoothed":
         method = "identity"
+    labels = None
     return GroupAlignment(
-        method=method, labels=labels, scale_template=True, n_jobs=N_JOBS
+        method=method,
+        labels=labels,
+        scale_template=True,
+        n_jobs=N_JOBS,
+        n_iter=1,
     )
+
+
+def z_map_and_threshold(maps, q_idx):
+    """One-sample z-map of quantity q_idx and its threshold at ALPHA.
+
+    maps: {hemi: {subject: (n_quantities, n_vertices)}}
+    """
+    imgs = [
+        SurfaceImage(
+            mesh=mesh, data={HEMIS[h]: maps[h][s][q_idx] for h in HEMIS}
+        )
+        for s in maps["L"]
+    ]
+    design_matrix = pd.DataFrame({"intercept": np.ones(len(imgs))})
+    z_map = (
+        SecondLevelModel()
+        .fit(imgs, design_matrix=design_matrix)
+        .compute_contrast("intercept", output_type="z_score")
+    )
+    _, threshold = threshold_stats_img(
+        z_map, alpha=ALPHA, height_control=HEIGHT_CONTROL, two_sided=True
+    )
+    return z_map, threshold
 
 
 # %%
@@ -156,14 +199,21 @@ if "identity_smoothed" in METHODS:
         )
 
 # %%
-# scores[method][hemi] -> (n_splits * n_test_subjects, n_vertices)
-scores = {method: {hemi: [] for hemi in HEMIS} for method in METHODS}
+# z_maps[split, condition, quantity] -> (unthresholded z-map, threshold)
+# conditions: "ground_truth" and every method
+z_maps = {}
 kfold = KFold(n_splits=2, shuffle=True, random_state=0)
 for align_ses in (0, 1):
     eval_ses = 1 - align_ses
-    for train_idx, test_idx in kfold.split(subjects):
+    for fold, (train_idx, test_idx) in enumerate(kfold.split(subjects)):
+        split = f"align ses {align_ses}, fold {fold + 1} / 2"
         train, test = subjects[train_idx], subjects[test_idx]
+        ground_truth = {
+            h: {s: data[eval_ses][h][s] for s in test} for h in HEMIS
+        }
+        predictions = {}
         for method in METHODS:
+            predictions[method] = {hemi: {} for hemi in HEMIS}
             for hemi in HEMIS:
                 aligner = _make_aligner(method, hemi, mesh, labels[hemi])
                 aligner.fit(
@@ -172,59 +222,79 @@ for align_ses in (0, 1):
                 eval_data = smoothed if method == "identity_smoothed" else data
                 X_eval = {s: eval_data[eval_ses][hemi][s] for s in train}
                 for s in test:
-                    y_pred = aligner.predict_subject(
+                    predictions[method][hemi][s] = aligner.predict_subject(
                         X_eval, data[align_ses][hemi][s]
                     )
-                    scores[method][hemi].append(
-                        score_voxelwise(
-                            data[eval_ses][hemi][s], y_pred, loss="corr"
-                        )
-                    )
-            print(f"Done: align on session {align_ses}, {method}")
+        for condition, maps in {
+            "ground_truth": ground_truth,
+            **predictions,
+        }.items():
+            for q_idx, quantity in enumerate(quantities):
+                z_maps[split, condition, quantity] = z_map_and_threshold(
+                    maps, q_idx
+                )
+        print(f"Done: {split}")
 
 # %%
-mean_corr = {}
-for method in METHODS:
-    # Mean over vertices, then over (split, test subject) pairs
-    per_subject = np.nanmean(
-        np.hstack([np.array(scores[method][h]) for h in HEMIS]), axis=1
-    )
-    print(
-        f"{method}: mean correlation {per_subject.mean():.3f} "
-        f"± {per_subject.std():.3f} (sd over {len(per_subject)} predictions)"
-    )
-    mean_corr[method] = per_subject.mean()
+splits = list(dict.fromkeys(key[0] for key in z_maps))
 
 # %%
-sulcal = load_fsaverage_data(MESH_NAME, data_type="sulcal", mesh_type="pial")
+# Thresholded group z-maps of each split, as in glm_second_level.py
 inflated = load_fsaverage(MESH_NAME)["inflated"]
-fig, axes = plt.subplots(
-    len(METHODS),
-    len(HEMIS),
-    figsize=(8, 3 * len(METHODS)),
-    subplot_kw={"projection": "3d"},
-    squeeze=False,
+n_vertices = inflated.parts[HEMI].n_vertices
+glasser = SurfaceImage(
+    mesh=inflated,
+    data={
+        hemi: nib.freesurfer.read_annot(
+            ATLAS_DIR / f"{h.lower()}h.HCP-MMP1.annot"
+        )[0][:n_vertices]
+        for h, hemi in HEMIS.items()
+    },
 )
-for row, method in enumerate(METHODS):
-    for col, (hemi, hemi_name) in enumerate(HEMIS.items()):
-        hemi_scores = np.array(scores[method][hemi])
-        plot_surf_stat_map(
-            inflated.parts[hemi_name],
-            stat_map=np.nanmean(hemi_scores, axis=0),
-            hemi=hemi_name,
-            view="lateral",
-            bg_map=sulcal.data.parts[hemi_name],
-            bg_on_data=True,
-            vmax=1,
-            cmap="cold_hot",
-            title=f"{method} (mean r = {mean_corr[method]:.3f})\n"
-            f"hemi {hemi}: mean r = {np.nanmean(hemi_scores):.3f}",
-            axes=axes[row, col],
-            figure=fig,
-        )
-# fig.suptitle("Correlation between predicted and actual maps, per vertex")
-fig.savefig(
-    OUTPUT_ROOT / "alignment" / "generalization_correlation_per_vertex.png",
-    dpi=300,
-)
+# All parcels of the displayed hemisphere (0 is the medial wall)
+glasser_levels = [
+    int(label) for label in np.unique(glasser.data.parts[HEMI]) if label > 0
+]
+
+conditions = ["ground_truth", *METHODS]
+figures_dir = OUTPUT_ROOT / "alignment"
+figures_dir.mkdir(parents=True, exist_ok=True)
+for i, split in enumerate(splits):
+    fig, axes = plt.subplots(
+        len(quantities),
+        len(conditions),
+        figsize=(4 * len(conditions), 3 * len(quantities)),
+        subplot_kw={"projection": "3d"},
+        squeeze=False,
+    )
+    for col, condition in enumerate(conditions):
+        for row, quantity in enumerate(quantities):
+            z_map, threshold = z_maps[split, condition, quantity]
+            plot_surf_stat_map(
+                inflated,
+                stat_map=z_map,
+                hemi=HEMI,
+                view=VIEW,
+                bg_map=np.full(n_vertices, 0.5),
+                bg_on_data=False,
+                threshold=threshold,
+                cmap="cold_hot",
+                colorbar=False,
+                title=f"{quantity} - {condition} (z > {threshold:.2f})",
+                axes=axes[row, col],
+                figure=fig,
+            )
+            plot_surf_contours(
+                inflated,
+                roi_map=glasser,
+                hemi=HEMI,
+                levels=glasser_levels,
+                colors=[OUTLINE_COLOR] * len(glasser_levels),
+                axes=axes[row, col],
+                figure=fig,
+            )
+    fig.suptitle(f"Second-level z-maps ({split}), {HEIGHT_CONTROL} < {ALPHA}")
+    fig.savefig(
+        figures_dir / f"generalization_zmaps_split-{i + 1}.png", dpi=150
+    )
 show()
