@@ -7,13 +7,14 @@ second group is then aligned to this template with its own alignment session,
 and its maps of the other session are predicted from the first group
 (``GroupAlignment.predict_subject``).
 
-For each quantity, a one-sample second-level GLM (as in glm_second_level.py)
-is fit on the predicted maps of the second group, and another one on their
-actual maps (ground truth). The thresholded group z-maps are plotted side by
-side, one figure per split.
-
 Groups (2-fold split of the subjects) and sessions (alignment / evaluation)
-are swapped, which gives 4 splits.
+are swapped, which gives 4 splits: every subject is predicted once for each
+session. The two predictions of each subject are averaged, as are its two
+actual session maps (ground truth), and a one-sample second-level GLM (as in
+glm_second_level.py) is fit over all subjects for each quantity. Note that
+z-maps of the predictions are descriptive only: predictions of subjects of the
+same test group are built from the same group of subjects, so they are not
+independent.
 """
 
 import os
@@ -47,7 +48,7 @@ METHODS = [
     # "identity_smoothed",
     "procrustes",
     # "spectral_ot_geometric",
-    # "spectral_ot",
+    "spectral_ot",
 ]
 # "identity_smoothed": identity, with the maps used for the prediction smoothed
 # with SMOOTHING_FWHM (the predicted subject's actual maps are not smoothed)
@@ -199,21 +200,18 @@ if "identity_smoothed" in METHODS:
         )
 
 # %%
-# z_maps[split, condition, quantity] -> (unthresholded z-map, threshold)
-# conditions: "ground_truth" and every method
-z_maps = {}
+# predictions[method][hemi][subject] -> one prediction per evaluation session,
+# each made when the subject is in the test group
+predictions = {
+    method: {hemi: {s: [] for s in subjects} for hemi in HEMIS}
+    for method in METHODS
+}
 kfold = KFold(n_splits=2, shuffle=True, random_state=0)
 for align_ses in (0, 1):
     eval_ses = 1 - align_ses
     for fold, (train_idx, test_idx) in enumerate(kfold.split(subjects)):
-        split = f"align ses {align_ses}, fold {fold + 1} / 2"
         train, test = subjects[train_idx], subjects[test_idx]
-        ground_truth = {
-            h: {s: data[eval_ses][h][s] for s in test} for h in HEMIS
-        }
-        predictions = {}
         for method in METHODS:
-            predictions[method] = {hemi: {} for hemi in HEMIS}
             for hemi in HEMIS:
                 aligner = _make_aligner(method, hemi, mesh, labels[hemi])
                 aligner.fit(
@@ -222,24 +220,48 @@ for align_ses in (0, 1):
                 eval_data = smoothed if method == "identity_smoothed" else data
                 X_eval = {s: eval_data[eval_ses][hemi][s] for s in train}
                 for s in test:
-                    predictions[method][hemi][s] = aligner.predict_subject(
-                        X_eval, data[align_ses][hemi][s]
+                    predictions[method][hemi][s].append(
+                        aligner.predict_subject(
+                            X_eval, data[align_ses][hemi][s]
+                        )
                     )
-        for condition, maps in {
-            "ground_truth": ground_truth,
-            **predictions,
-        }.items():
-            for q_idx, quantity in enumerate(quantities):
-                z_maps[split, condition, quantity] = z_map_and_threshold(
-                    maps, q_idx
-                )
-        print(f"Done: {split}")
+        print(f"Done: align on session {align_ses}, fold {fold + 1} / 2")
 
 # %%
-splits = list(dict.fromkeys(key[0] for key in z_maps))
+# Average the two sessions of each subject, then one GLM over all subjects
+session_means = {
+    "ground_truth": {
+        h: {
+            s: np.mean([data[0][h][s], data[1][h][s]], axis=0) for s in subjects
+        }
+        for h in HEMIS
+    },
+    **{
+        method: {
+            h: {s: np.mean(preds, axis=0) for s, preds in maps[h].items()}
+            for h in HEMIS
+        }
+        for method, maps in predictions.items()
+    },
+}
+# z_maps[condition, quantity] -> (unthresholded z-map, threshold)
+z_maps = {
+    (condition, quantity): z_map_and_threshold(maps, q_idx)
+    for condition, maps in session_means.items()
+    for q_idx, quantity in enumerate(quantities)
+}
+
+# Unthresholded z-maps, saved as one GIfTI file per hemisphere
+figures_dir = OUTPUT_ROOT / "alignment"
+maps_dir = figures_dir / "generalization_zmaps"
+maps_dir.mkdir(parents=True, exist_ok=True)
+for (condition, quantity), (z_map, _) in z_maps.items():
+    z_map.data.to_filename(
+        maps_dir / f"quantity-{quantity}_method-{condition}_stat-z_score.gii"
+    )
 
 # %%
-# Thresholded group z-maps of each split, as in glm_second_level.py
+# Thresholded group z-maps, as in glm_second_level.py
 inflated = load_fsaverage(MESH_NAME)["inflated"]
 n_vertices = inflated.parts[HEMI].n_vertices
 glasser = SurfaceImage(
@@ -257,44 +279,41 @@ glasser_levels = [
 ]
 
 conditions = ["ground_truth", *METHODS]
-figures_dir = OUTPUT_ROOT / "alignment"
-figures_dir.mkdir(parents=True, exist_ok=True)
-for i, split in enumerate(splits):
-    fig, axes = plt.subplots(
-        len(quantities),
-        len(conditions),
-        figsize=(4 * len(conditions), 3 * len(quantities)),
-        subplot_kw={"projection": "3d"},
-        squeeze=False,
-    )
-    for col, condition in enumerate(conditions):
-        for row, quantity in enumerate(quantities):
-            z_map, threshold = z_maps[split, condition, quantity]
-            plot_surf_stat_map(
-                inflated,
-                stat_map=z_map,
-                hemi=HEMI,
-                view=VIEW,
-                bg_map=np.full(n_vertices, 0.5),
-                bg_on_data=False,
-                threshold=threshold,
-                cmap="cold_hot",
-                colorbar=False,
-                title=f"{quantity} - {condition} (z > {threshold:.2f})",
-                axes=axes[row, col],
-                figure=fig,
-            )
-            plot_surf_contours(
-                inflated,
-                roi_map=glasser,
-                hemi=HEMI,
-                levels=glasser_levels,
-                colors=[OUTLINE_COLOR] * len(glasser_levels),
-                axes=axes[row, col],
-                figure=fig,
-            )
-    fig.suptitle(f"Second-level z-maps ({split}), {HEIGHT_CONTROL} < {ALPHA}")
-    fig.savefig(
-        figures_dir / f"generalization_zmaps_split-{i + 1}.png", dpi=150
-    )
+fig, axes = plt.subplots(
+    len(quantities),
+    len(conditions),
+    figsize=(4 * len(conditions), 3 * len(quantities)),
+    subplot_kw={"projection": "3d"},
+    squeeze=False,
+)
+for col, condition in enumerate(conditions):
+    for row, quantity in enumerate(quantities):
+        z_map, threshold = z_maps[condition, quantity]
+        plot_surf_stat_map(
+            inflated,
+            stat_map=z_map,
+            hemi=HEMI,
+            view=VIEW,
+            bg_map=np.full(n_vertices, 0.5),
+            bg_on_data=False,
+            threshold=threshold,
+            cmap="cold_hot",
+            colorbar=False,
+            title=f"{quantity} - {condition} (z > {threshold:.2f})",
+            axes=axes[row, col],
+            figure=fig,
+        )
+        plot_surf_contours(
+            inflated,
+            roi_map=glasser,
+            hemi=HEMI,
+            levels=glasser_levels,
+            colors=[OUTLINE_COLOR] * len(glasser_levels),
+            axes=axes[row, col],
+            figure=fig,
+        )
+fig.suptitle(
+    f"Second-level z-maps on session-averaged maps, {HEIGHT_CONTROL} < {ALPHA}"
+)
+fig.savefig(figures_dir / "generalization_zmaps.png", dpi=150)
 show()
