@@ -45,7 +45,6 @@ DATA_DIR = Path(
     "ExplorePlus_MeynielPaunovRaglio_2024"
 )
 DERIVATIVES_FOLDER = "derivatives/fmriprep-24.1.1_mne-bids-pipeline-1.9.0"
-OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs")
 TASK_LABEL = "ExplorePlus"
 
 # Ideal observer
@@ -65,7 +64,7 @@ N_JOBS = 10
 VERBOSE = 10
 
 # Surface
-MESH_NAME = "fsaverage5"
+MESH_NAME = "fsaverage6"
 VOLUME_SPACE = "MNI152NLin2009cAsym"
 
 # Onsets the regressors lock to; loaded once per run.
@@ -85,6 +84,8 @@ CONTRASTS = {
 }
 OUTPUT_TYPES = ("effect_size", "effect_variance", "z_score")
 
+# Output dir
+OUTPUT_ROOT = Path("/home/plbarbarant/repos/explore_design/outputs") / MESH_NAME
 
 # %%
 # Events
